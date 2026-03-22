@@ -3569,7 +3569,7 @@ dependencies = [
 
 [[package]]
 name = "wishlist-pulse"
-version = "0.1.1"
+version = "0.1.0"
 dependencies = [
  "argon2",
  "axum",
