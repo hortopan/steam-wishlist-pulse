@@ -143,11 +143,51 @@ jobs:
       - name: Install dependencies
         run: |
           ${{ matrix.packages_install }}
+      - name: Import Apple codesigning certificate
+        if: ${{ runner.os == 'macOS' }}
+        env:
+          APPLE_CERT_BASE64: ${{ secrets.APPLE_CERT_BASE64 }}
+          APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+        run: |
+          echo "$APPLE_CERT_BASE64" | base64 -d > cert.p12
+          security create-keychain -p "actions" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "actions" build.keychain
+          security import cert.p12 -k build.keychain -P "$APPLE_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -k "actions" build.keychain
+          rm cert.p12
       - name: Build artifacts
         run: |
           # Actually do builds and make zips and whatnot
           dist build ${{ needs.plan.outputs.tag-flag }} --print=linkage --output-format=json ${{ matrix.dist_args }} > dist-manifest.json
           echo "dist ran successfully"
+      - name: Codesign macOS binary
+        if: ${{ runner.os == 'macOS' }}
+        run: |
+          for bin in target/distrib/wishlist-pulse-*/**/wishlist-pulse; do
+            if [ -f "$bin" ]; then
+              codesign --force --options runtime -s "Developer ID Application" "$bin"
+              echo "Signed: $bin"
+            fi
+          done
+      - name: Notarize macOS binary
+        if: ${{ runner.os == 'macOS' && needs.plan.outputs.publishing == 'true' }}
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          for bin in target/distrib/wishlist-pulse-*/**/wishlist-pulse; do
+            if [ -f "$bin" ]; then
+              zip -j "${bin}.zip" "$bin"
+              xcrun notarytool submit "${bin}.zip" \
+                --apple-id "$APPLE_ID" \
+                --password "$APPLE_APP_PASSWORD" \
+                --team-id "$APPLE_TEAM_ID" \
+                --wait
+              rm "${bin}.zip"
+            fi
+          done
       - id: cargo-dist
         name: Post-build
         # We force bash here just because github makes it really hard to get values up
