@@ -16,6 +16,7 @@
   let selectedGameId = $state<number | null>(null);
   let soundEnabled = $state(isSoundEnabled());
   let hasHealthIssue = $state(false);
+  let appVersion = $state<string | null>(null);
   let unsubHealth: (() => void) | null = null;
 
   function toggleSound() {
@@ -41,6 +42,7 @@
       const res = await fetch('/api/auth/status');
       const data = await res.json();
 
+      if (data.version) appVersion = data.version;
       if (data.setup_required) {
         view = 'setup';
       } else if (data.authenticated) {
@@ -176,7 +178,29 @@
   <Admin {onLogout} />
 {/if}
 
+{#if appVersion}
+  <footer class="app-footer"><a href="https://github.com/hortopan/steam-wishlist-pulse" target="_blank" rel="noopener noreferrer">Wishlist Pulse</a> v{appVersion}</footer>
+{/if}
+
 <style>
+  .app-footer {
+    text-align: center;
+    margin-top: 3rem;
+    padding: 1rem 0;
+    border-top: 1px solid var(--border);
+    color: var(--text-muted);
+    font-size: 0.75rem;
+    opacity: 0.5;
+  }
+
+  .app-footer a {
+    color: var(--text-muted);
+    text-decoration: none;
+  }
+
+  .app-footer a:hover {
+    color: var(--accent);
+  }
   .app-header {
     display: flex;
     justify-content: space-between;

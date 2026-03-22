@@ -399,6 +399,7 @@ struct AuthStatus {
     authenticated: bool,
     access_level: Option<AccessLevel>,
     setup_required: bool,
+    version: &'static str,
 }
 
 #[derive(Deserialize)]
@@ -571,6 +572,7 @@ async fn api_auth_status(State(state): State<AppState>, jar: CookieJar) -> Json<
         authenticated: session.is_some(),
         access_level: session.map(|s| s.access_level),
         setup_required,
+        version: env!("CARGO_PKG_VERSION"),
     })
 }
 

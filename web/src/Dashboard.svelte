@@ -254,9 +254,10 @@
   }
 
   .grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    display: flex;
+    flex-wrap: wrap;
     gap: 1rem;
+    justify-content: center;
   }
 
   .card {
@@ -267,6 +268,10 @@
     transition:
       border-color 0.2s,
       transform 0.2s;
+    width: 100%;
+    max-width: 400px;
+    min-width: 320px;
+    flex: 1 1 320px;
   }
 
   .card.flash {

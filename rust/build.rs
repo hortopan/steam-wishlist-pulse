@@ -9,6 +9,7 @@ fn main() {
 
     let web_dir = Path::new("../web");
     let dist_dir = web_dir.join("dist");
+    let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
 
     // Ensure dist directory exists so rust-embed derive doesn't fail
     std::fs::create_dir_all(&dist_dir).expect("Failed to create web/dist directory");
@@ -19,7 +20,7 @@ fn main() {
     }
 
     if !web_dir.join("node_modules").exists() {
-        let status = Command::new("npm")
+        let status = Command::new(npm)
             .arg("install")
             .current_dir(web_dir)
             .status()
@@ -27,7 +28,7 @@ fn main() {
         assert!(status.success(), "npm install failed");
     }
 
-    let status = Command::new("npm")
+    let status = Command::new(npm)
         .args(["run", "build"])
         .current_dir(web_dir)
         .status()

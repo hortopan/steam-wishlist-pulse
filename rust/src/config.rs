@@ -15,6 +15,7 @@ const DEFAULT_BIND_ADDRESS: &str = "0.0.0.0:3000";
 #[derive(Debug, Parser)]
 #[command(
     name = "wishlist-pulse",
+    version,
     about = "Track Steam wishlist pulse and deliver updates to Telegram channels.",
     long_about = None
 )]
