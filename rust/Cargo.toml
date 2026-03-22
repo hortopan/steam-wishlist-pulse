@@ -34,14 +34,3 @@ tower-http = { version = "0.6", features = ["cors"] }
 serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "model", "rustls_backend", "cache"] }
 thiserror = "2"
 futures = "0.3"
-
-[profile.release]
-opt-level = "z"        # optimize for size over speed
-lto = true             # full link-time optimization — also helps with static linking
-codegen-units = 1      # single codegen unit for maximum optimization
-panic = "abort"        # no unwinding tables
-strip = true           # strip symbols and debug info
-
-# The profile that 'dist' will build with
-[profile.dist]
-inherits = "release"
