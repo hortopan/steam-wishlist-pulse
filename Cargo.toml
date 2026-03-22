@@ -20,6 +20,8 @@ targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-
 install-path = "CARGO_HOME"
 # Whether to install an updater program
 install-updater = false
+# Allow custom modifications to the CI workflow
+allow-dirty = ["ci"]
 
 [profile.release]
 opt-level = "z"
