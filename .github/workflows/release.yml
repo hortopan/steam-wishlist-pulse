@@ -161,31 +161,43 @@ jobs:
           # Actually do builds and make zips and whatnot
           dist build ${{ needs.plan.outputs.tag-flag }} --print=linkage --output-format=json ${{ matrix.dist_args }} > dist-manifest.json
           echo "dist ran successfully"
-      - name: Codesign macOS binary
+      - name: Codesign and notarize macOS binaries
         if: ${{ runner.os == 'macOS' }}
-        run: |
-          for bin in target/distrib/wishlist-pulse-*/**/wishlist-pulse; do
-            if [ -f "$bin" ]; then
-              codesign --force --options runtime -s "Developer ID Application" "$bin"
-              echo "Signed: $bin"
-            fi
-          done
-      - name: Notarize macOS binary
-        if: ${{ runner.os == 'macOS' && needs.plan.outputs.publishing == 'true' }}
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          PUBLISHING: ${{ needs.plan.outputs.publishing }}
         run: |
-          for bin in target/distrib/wishlist-pulse-*/**/wishlist-pulse; do
+          # Sign binaries inside the dist output directories, then repackage the archives
+          for dir in target/distrib/wishlist-pulse-*/; do
+            bin="${dir}wishlist-pulse"
             if [ -f "$bin" ]; then
-              zip -j "${bin}.zip" "$bin"
-              xcrun notarytool submit "${bin}.zip" \
-                --apple-id "$APPLE_ID" \
-                --password "$APPLE_APP_PASSWORD" \
-                --team-id "$APPLE_TEAM_ID" \
-                --wait
-              rm "${bin}.zip"
+              echo "Signing: $bin"
+              codesign --force --options runtime -s "Developer ID Application" "$bin"
+              codesign -dvv "$bin"
+
+              if [ "$PUBLISHING" = "true" ]; then
+                zip -j "${bin}.zip" "$bin"
+                xcrun notarytool submit "${bin}.zip" \
+                  --apple-id "$APPLE_ID" \
+                  --password "$APPLE_APP_PASSWORD" \
+                  --team-id "$APPLE_TEAM_ID" \
+                  --wait
+                rm "${bin}.zip"
+                echo "Notarized: $bin"
+              fi
+
+              # Repackage the tar.xz with the signed binary
+              dirname=$(basename "$dir")
+              archive="target/distrib/${dirname}.tar.xz"
+              if [ -f "$archive" ]; then
+                echo "Repackaging: $archive"
+                rm "$archive"
+                tar -C target/distrib -cJf "$archive" "$dirname"
+                # Update the sha256
+                shasum -a 256 "$archive" | awk '{print $1}' > "${archive}.sha256"
+              fi
             fi
           done
       - id: cargo-dist
