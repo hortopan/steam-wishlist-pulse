@@ -2,7 +2,7 @@
 
 **Stop refreshing Steamworks.** Wishlist Pulse monitors your Steam wishlist numbers via the official [Wishlist Data API](https://steamcommunity.com/groups/steamworks/announcements/detail/499474120884358024) and pushes changes — adds, removes, purchases, gifts — straight to Telegram and Discord the moment they happen.
 
-Single binary, built-in web dashboard, SQLite storage. A few MB on disk, a few MB of RAM — runs happily on a Raspberry Pi.
+Single binary (~4 MB), built-in web dashboard, SQLite storage, minimal RAM — runs happily on a Raspberry Pi.
 
 ---
 
@@ -85,15 +85,48 @@ A built-in admin panel served from the same binary — no separate deploy:
 - **Steam Financial API Group Web API Key** — the Wishlist Data API uses the same financial permissions as the Sales Data API. See the [Steamworks docs](https://partner.steamgames.com/doc/webapi/IPartnerFinancialsService) for provisioning instructions. Note: Financial API Groups have access to all apps on your partner account and cannot be scoped to individual apps.
 - **Telegram bot token** from [@BotFather](https://t.me/BotFather)
 - **Discord bot token** *(optional)* from the [Discord Developer Portal](https://discord.com/developers/applications)
-- **Rust toolchain** and **Node.js** (for building from source)
 
-### Build & Run
+### Install
+
+#### Shell script (macOS / Linux)
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/hortopan/steam-wishlist-pulse/releases/download/v0.1.0/wishlist-pulse-installer.sh | sh
+```
+
+#### Homebrew
+
+```bash
+brew install hortopan/tap/wishlist-pulse
+```
+
+#### Manual download
+
+Prebuilt binaries for all platforms are available on the [Releases](https://github.com/hortopan/steam-wishlist-pulse/releases/latest) page:
+
+| Platform | File |
+| --- | --- |
+| Apple Silicon macOS | `wishlist-pulse-aarch64-apple-darwin.tar.xz` |
+| Intel macOS | `wishlist-pulse-x86_64-apple-darwin.tar.xz` |
+| x64 Windows | `wishlist-pulse-x86_64-pc-windows-msvc.zip` |
+| ARM64 Linux | `wishlist-pulse-aarch64-unknown-linux-musl.tar.xz` |
+| x64 Linux | `wishlist-pulse-x86_64-unknown-linux-musl.tar.xz` |
+
+### Build from source
+
+Requires **Rust toolchain** and **Node.js**.
 
 ```bash
 git clone git@github.com:hortopan/steam-wishlist-pulse.git
 cd wishlist-pulse-bot
 cargo build --release
 ./target/release/wishlist-pulse
+```
+
+### Run
+
+```bash
+wishlist-pulse
 ```
 
 Open `http://localhost:3000` to start the setup wizard.
