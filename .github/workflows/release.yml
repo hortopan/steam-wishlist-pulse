@@ -143,70 +143,11 @@ jobs:
       - name: Install dependencies
         run: |
           ${{ matrix.packages_install }}
-      - name: Import Apple codesigning certificate
-        if: ${{ runner.os == 'macOS' }}
-        env:
-          APPLE_CERT_BASE64: ${{ secrets.APPLE_CERT_BASE64 }}
-          APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
-        run: |
-          echo "$APPLE_CERT_BASE64" | base64 -d > cert.p12
-          security create-keychain -p "actions" build.keychain
-          security default-keychain -s build.keychain
-          security unlock-keychain -p "actions" build.keychain
-          security set-keychain-settings -t 3600 build.keychain
-          security import cert.p12 -k build.keychain -P "$APPLE_CERT_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "actions" build.keychain
-          security list-keychains -d user -s build.keychain login.keychain
-          # Verify identity is available
-          security find-identity -v build.keychain
-          rm cert.p12
       - name: Build artifacts
         run: |
           # Actually do builds and make zips and whatnot
           dist build ${{ needs.plan.outputs.tag-flag }} --print=linkage --output-format=json ${{ matrix.dist_args }} > dist-manifest.json
           echo "dist ran successfully"
-      - name: Codesign and notarize macOS binaries
-        if: ${{ runner.os == 'macOS' }}
-        env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          PUBLISHING: ${{ needs.plan.outputs.publishing }}
-        run: |
-          # Sign binaries inside the dist output directories, then repackage the archives
-          for dir in target/distrib/wishlist-pulse-*/; do
-            bin="${dir}wishlist-pulse"
-            if [ -f "$bin" ]; then
-              echo "Signing: $bin"
-              codesign --force --options runtime -s "$APPLE_SIGNING_IDENTITY" "$bin"
-              codesign -dvv "$bin"
-
-              if [ "$PUBLISHING" = "true" ]; then
-                zip -j "${bin}.zip" "$bin"
-                xcrun notarytool submit "${bin}.zip" \
-                  --apple-id "$APPLE_ID" \
-                  --password "$APPLE_APP_PASSWORD" \
-                  --team-id "$APPLE_TEAM_ID" \
-                  --wait
-                rm "${bin}.zip"
-                echo "Notarized: $bin"
-              fi
-
-              # Repackage the tar.xz with the signed binary
-              dirname=$(basename "$dir")
-              archive="target/distrib/${dirname}.tar.xz"
-              if [ -f "$archive" ]; then
-                echo "Repackaging: $archive"
-                rm "$archive"
-                tar -C target/distrib -cJf "$archive" "$dirname"
-                # Update the sha256 file — this is what dist uses to generate the Homebrew formula
-                new_sha=$(shasum -a 256 "$archive" | awk '{print $1}')
-                echo "$new_sha" > "${archive}.sha256"
-                echo "Updated checksum for $archive: $new_sha"
-              fi
-            fi
-          done
       - id: cargo-dist
         name: Post-build
         # We force bash here just because github makes it really hard to get values up
