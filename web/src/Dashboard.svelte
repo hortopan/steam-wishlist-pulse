@@ -270,8 +270,15 @@
       transform 0.2s;
     width: 100%;
     max-width: 400px;
-    min-width: 320px;
-    flex: 1 1 320px;
+    min-width: 280px;
+    flex: 1 1 280px;
+  }
+
+  @media (max-width: 600px) {
+    .card {
+      min-width: 0;
+      flex: 1 1 100%;
+    }
   }
 
   .card.flash {

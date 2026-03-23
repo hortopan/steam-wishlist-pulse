@@ -393,6 +393,7 @@
     background: var(--bg, #1a1d23);
     padding: 0.1rem 0.35rem;
     border-radius: 3px;
+    word-break: break-all;
   }
   .api-key-why {
     margin-bottom: 0 !important;
@@ -419,6 +420,13 @@
     margin-bottom: 1.5rem;
     border-bottom: 1px solid var(--border);
     padding-bottom: 0;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+
+  .tabs::-webkit-scrollbar {
+    display: none;
   }
 
   .tab {
@@ -434,6 +442,8 @@
       color 0.2s,
       border-color 0.2s;
     margin-bottom: -1px;
+    white-space: nowrap;
+    flex-shrink: 0;
   }
 
   .tab:hover {
@@ -474,6 +484,12 @@
     border: 1px solid var(--border);
     border-radius: 0.75rem;
     padding: 1.5rem;
+  }
+
+  @media (max-width: 600px) {
+    .config-section {
+      padding: 1rem;
+    }
   }
 
   .secret-status {
@@ -588,11 +604,19 @@
     position: fixed;
     top: 1.5rem;
     right: 1.5rem;
+    left: 1.5rem;
     z-index: 1000;
     display: flex;
     flex-direction: column;
     gap: 0.5rem;
     pointer-events: none;
+  }
+
+  @media (min-width: 601px) {
+    .toast-container {
+      left: auto;
+      min-width: 300px;
+    }
   }
 
   .toast {

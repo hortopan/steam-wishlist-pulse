@@ -208,6 +208,8 @@
     padding-bottom: 1rem;
     margin-bottom: 1.5rem;
     border-bottom: 1px solid var(--border);
+    gap: 0.5rem;
+    flex-wrap: wrap;
   }
 
   .logo-link {
@@ -225,7 +227,7 @@
   .header-actions {
     display: flex;
     align-items: center;
-    gap: 0.75rem;
+    gap: 0.5rem;
   }
 
   .header-btn {
@@ -237,6 +239,14 @@
     cursor: pointer;
     font-size: 0.85rem;
     transition: border-color 0.2s, color 0.2s;
+    white-space: nowrap;
+  }
+
+  @media (max-width: 600px) {
+    .header-btn {
+      padding: 0.4rem 0.65rem;
+      font-size: 0.8rem;
+    }
   }
 
   .header-btn:hover {

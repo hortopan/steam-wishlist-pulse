@@ -132,6 +132,17 @@
             >Last updated {timeAgo(data.latest.changed_at, now)}</span
           >
         {/if}
+        <div class="hero-links">
+          <a href={`https://store.steampowered.com/app/${data.app_id}`} target="_blank" rel="noopener noreferrer" class="hero-link">
+            <svg width="14" height="14" viewBox="0 0 20 20" fill="none"><path d="M11 3H17V9" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M17 3L9 11" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M15 11V16C15 16.5523 14.5523 17 14 17H4C3.44772 17 3 16.5523 3 16V6C3 5.44772 3.44772 5 4 5H9" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            Store Page
+          </a>
+          <a href={`https://partner.steamgames.com/apps/landing/${data.app_id}`} target="_blank" rel="noopener noreferrer" class="hero-link">
+            <svg width="14" height="14" viewBox="0 0 20 20" fill="none"><path d="M11 3H17V9" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M17 3L9 11" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M15 11V16C15 16.5523 14.5523 17 14 17H4C3.44772 17 3 16.5523 3 16V6C3 5.44772 3.44772 5 4 5H9" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            Steamworks
+          </a>
+
+        </div>
       </div>
     </div>
 
@@ -342,6 +353,31 @@
   .hero-updated {
     font-size: 0.8rem;
     color: var(--accent);
+  }
+
+  .hero-links {
+    display: flex;
+    gap: 0.5rem;
+    margin-top: 0.5rem;
+    flex-wrap: wrap;
+  }
+
+  .hero-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    background: rgba(255, 255, 255, 0.1);
+    padding: 0.3rem 0.65rem;
+    border-radius: 0.375rem;
+    text-decoration: none;
+    transition: background 0.2s, color 0.2s;
+  }
+
+  .hero-link:hover {
+    background: rgba(255, 255, 255, 0.2);
+    color: var(--text);
   }
 
   /* Stats */
@@ -581,8 +617,33 @@
       font-size: 1.3rem;
     }
 
+    .hero-overlay {
+      padding: 1.5rem 1rem 1rem;
+    }
+
     .stat-big-value {
       font-size: 1.3rem;
+    }
+
+    .stat-card {
+      padding: 0.85rem 0.5rem;
+    }
+
+    .net-row {
+      padding: 0.75rem 1rem;
+    }
+
+    .history-section {
+      padding: 1rem;
+    }
+
+    .history-table {
+      font-size: 0.78rem;
+    }
+
+    .history-table th,
+    .history-table td {
+      padding: 0.5rem 0.4rem;
     }
   }
 </style>

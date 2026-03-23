@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from "svelte";
   import LogoBrand from "./LogoBrand.svelte";
   import { apiPost } from "./api";
 
@@ -7,6 +8,11 @@
   let password = $state("");
   let error = $state<string | null>(null);
   let loading = $state(false);
+  let passwordInput!: HTMLInputElement;
+
+  onMount(() => {
+    passwordInput?.focus();
+  });
 
   async function handleLogin(e: Event) {
     e.preventDefault();
@@ -15,7 +21,16 @@
     try {
       const data = await apiPost<{ success: boolean; error?: string }>("/auth/login", { password });
       if (data.success) {
-        onLogin();
+        // Verify the session cookie was actually stored by the browser
+        const status = await fetch('/api/auth/status');
+        const statusData = await status.json();
+        if (statusData.authenticated) {
+          onLogin();
+        } else {
+          error = window.location.protocol === 'http:'
+            ? "Login succeeded but your browser rejected the session cookie because you're on plain HTTP. Either access the app over HTTPS, or start the server with the --insecure flag to allow cookies over HTTP."
+            : "Login succeeded but session could not be established. Your browser may be blocking cookies.";
+        }
       } else {
         error = data.error || "Login failed";
       }
@@ -44,9 +59,9 @@
           id="password"
           type="password"
           bind:value={password}
+          bind:this={passwordInput}
           placeholder="Enter your password"
           disabled={loading}
-          autofocus
         />
       </div>
 
@@ -72,6 +87,12 @@
     padding: 3rem;
     width: 100%;
     max-width: 400px;
+  }
+
+  @media (max-width: 600px) {
+    .login-card {
+      padding: 1.5rem;
+    }
   }
 
   .login-logo {

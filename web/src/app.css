@@ -25,6 +25,7 @@ body {
   min-height: 100vh;
   user-select: none;
   -webkit-user-select: none;
+  overflow-x: hidden;
 }
 
 input, textarea, .selectable,
@@ -38,4 +39,10 @@ input, textarea, .selectable,
   max-width: 1200px;
   margin: 0 auto;
   padding: 2rem;
+}
+
+@media (max-width: 600px) {
+  #app {
+    padding: 1rem;
+  }
 }

@@ -1,8 +1,14 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import LogoBrand from './LogoBrand.svelte';
   import { apiPost } from './api';
 
   let { onSetup }: { onSetup: () => void } = $props();
+  let adminPasswordInput!: HTMLInputElement;
+
+  onMount(() => {
+    adminPasswordInput?.focus();
+  });
 
   let adminPassword = $state('');
   let adminPasswordConfirm = $state('');
@@ -34,7 +40,16 @@
 
       const data = await apiPost<{ success: boolean; error?: string }>('/setup', body);
       if (data.success) {
-        onSetup();
+        // Verify the session cookie was actually stored by the browser
+        const status = await fetch('/api/auth/status');
+        const statusData = await status.json();
+        if (statusData.authenticated) {
+          onSetup();
+        } else {
+          error = window.location.protocol === 'http:'
+            ? "Setup succeeded but your browser rejected the session cookie because you're on plain HTTP. Either access the app over HTTPS, or start the server with the --insecure flag to allow cookies over HTTP."
+            : "Setup succeeded but session could not be established. Your browser may be blocking cookies.";
+        }
       } else {
         error = data.error || 'Setup failed';
       }
@@ -76,9 +91,9 @@
           <input
             type="password"
             bind:value={adminPassword}
+            bind:this={adminPasswordInput}
             placeholder={singlePassword ? 'Choose a password' : 'Admin password'}
             disabled={loading}
-            autofocus
           />
         </div>
         <div class="form-group">

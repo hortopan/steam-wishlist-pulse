@@ -151,6 +151,12 @@
     padding: 1.5rem;
   }
 
+  @media (max-width: 600px) {
+    .config-section {
+      padding: 1rem;
+    }
+  }
+
   .config-section h2 {
     font-size: 1.2rem;
     font-weight: 600;
@@ -186,6 +192,7 @@
     font-size: 0.75rem;
     color: var(--text-muted);
     margin-top: 0.25rem;
+    word-break: break-all;
   }
 
   .save-btn {
@@ -295,6 +302,25 @@
       border-color 0.2s,
       color 0.2s;
     flex-shrink: 0;
+  }
+
+  @media (max-width: 600px) {
+    .tracked-game {
+      flex-wrap: wrap;
+    }
+
+    .game-thumb {
+      width: 80px;
+      height: 30px;
+    }
+
+    .game-info {
+      flex: 1 1 calc(100% - 100px);
+    }
+
+    .untrack-btn {
+      margin-left: auto;
+    }
   }
 
   .untrack-btn:hover:not(:disabled) {

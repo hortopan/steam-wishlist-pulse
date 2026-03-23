@@ -105,6 +105,12 @@
     padding: 1.5rem;
   }
 
+  @media (max-width: 600px) {
+    .config-section {
+      padding: 1rem;
+    }
+  }
+
   .config-section h2 {
     font-size: 1.2rem;
     font-weight: 600;
