@@ -1,6 +1,6 @@
 use serenity::all::{
     ChannelId, Command, CommandInteraction, CommandOptionType, Context, CreateCommand,
-    CreateCommandOption, CreateEmbed, CreateInteractionResponse, CreateInteractionResponseMessage,
+    CreateCommandOption, CreateEmbed, CreateInteractionResponse,
     CreateMessage, EditInteractionResponse, EventHandler,
     GatewayIntents, Ready,
 };
@@ -99,18 +99,25 @@ impl Handler {
     ) -> Result<(), String> {
         let user_id = cmd.user.id.get();
 
+        // Defer immediately to avoid Discord's 3-second interaction timeout.
+        self.defer(ctx, cmd).await?;
+
         match cmd.data.name.as_str() {
             "help" => {
-                self.respond(ctx, cmd, &self.help_text()).await?;
+                self.edit_response(ctx, cmd, &self.help_text()).await?;
             }
             "whoami" => {
-                self.respond(ctx, cmd, &format!("Your Discord user ID is: `{user_id}`"))
+                self.edit_response(ctx, cmd, "Your Discord user ID is:")
                     .await?;
+                cmd.channel_id
+                    .say(&ctx.http, format!("`{user_id}`"))
+                    .await
+                    .map_err(|e| format!("Failed to send follow-up: {e}"))?;
             }
             "list" | "track" | "untrack" | "status" | "subscribe" | "unsubscribe"
             | "subscriptions" => {
                 if !is_admin(user_id, &self.ctx.admin_ids) {
-                    self.respond(
+                    self.edit_response(
                         ctx,
                         cmd,
                         &format!(
@@ -120,7 +127,6 @@ impl Handler {
                     .await?;
                     return Ok(());
                 }
-                self.defer(ctx, cmd).await?;
                 match cmd.data.name.as_str() {
                     "list" => self.cmd_list(ctx, cmd).await?,
                     "track" => self.cmd_track(ctx, cmd).await?,
@@ -133,7 +139,7 @@ impl Handler {
                 }
             }
             _ => {
-                self.respond(ctx, cmd, "Unknown command. Use /help to see available commands.")
+                self.edit_response(ctx, cmd, "Unknown command. Use /help to see available commands.")
                     .await?;
             }
         }
@@ -152,22 +158,6 @@ impl Handler {
          `/subscriptions` — List channel subscriptions\n\
          `/whoami` — Show your Discord user ID"
             .to_string()
-    }
-
-    async fn respond(
-        &self,
-        ctx: &Context,
-        cmd: &CommandInteraction,
-        content: &str,
-    ) -> Result<(), String> {
-        cmd.create_response(
-            &ctx.http,
-            CreateInteractionResponse::Message(
-                CreateInteractionResponseMessage::new().content(content),
-            ),
-        )
-        .await
-        .map_err(|e| format!("Failed to respond: {e}"))
     }
 
     async fn defer(
@@ -202,7 +192,7 @@ impl Handler {
         let app_info = self.ctx.db.get_all_app_info().await.unwrap_or_default();
         let lines: Vec<String> = tracked
             .iter()
-            .map(|&id| format!("• **{}**", resolve_app_name_short(id, &app_info)))
+            .map(|&id| format!("• **{}** ({id})", resolve_app_name_short(id, &app_info)))
             .collect();
 
         self.edit_response(ctx, cmd, &format!("**Tracked games:**\n{}", lines.join("\n")))

@@ -78,7 +78,7 @@ pub struct AnomalyConfig {
     pub sensitivity_up: f64,
     /// Sensitivity multiplier for downward deviations (drops).
     pub sensitivity_down: f64,
-    pub min_absolute: u64,
+    pub min_absolute: i64,
     /// Floor for MAD as a fraction of the median (e.g. 0.05 = 5%).
     /// Prevents false positives when the baseline is very stable.
     pub mad_floor_pct: f64,
@@ -291,9 +291,9 @@ async fn detect_country_anomalies(
     anomalies
 }
 
-/// Safely compute delta between two u64 values as i64.
-fn safe_delta(current: u64, previous: u64) -> i64 {
-    i64::try_from(current).unwrap_or(i64::MAX) - i64::try_from(previous).unwrap_or(i64::MAX)
+/// Compute delta between two i64 values.
+fn safe_delta(current: i64, previous: i64) -> i64 {
+    current - previous
 }
 
 /// Determine if a rate is anomalous using a modified z-score (median + MAD).
@@ -312,7 +312,7 @@ fn is_rate_anomalous(rate: f64, raw_delta: i64, median: f64, mad: f64, config: &
     }
     // When the baseline median is near zero, any non-zero activity is statistically
     // significant — skip the min_absolute gate so early signals aren't suppressed.
-    if median.abs() > f64::EPSILON && raw_delta.unsigned_abs() < config.min_absolute {
+    if median.abs() > f64::EPSILON && raw_delta.abs() < config.min_absolute {
         return false;
     }
     if mad == 0.0 {

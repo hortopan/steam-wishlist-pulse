@@ -56,11 +56,11 @@ async fn handle_command(
     }
 
     if matches!(cmd, Command::Whoami) {
-        bot.send_message(
-            msg.chat.id,
-            format!("Your Telegram user ID is: {}", user_id),
-        )
-        .await?;
+        bot.send_message(msg.chat.id, "Your Telegram user ID is:")
+            .await?;
+        bot.send_message(msg.chat.id, format!("`{}`", user_id))
+            .parse_mode(teloxide::types::ParseMode::MarkdownV2)
+            .await?;
         return Ok(());
     }
 
@@ -410,7 +410,7 @@ async fn handle_callback(bot: Bot, q: CallbackQuery, state: BotContext) -> Respo
 
     let user_id = q.from.id.0;
     if !is_admin(user_id, &state.admin_ids) {
-        bot.answer_callback_query(&q.id)
+        bot.answer_callback_query(q.id.clone())
             .text("⛔ Unauthorized")
             .await?;
         return Ok(());
@@ -421,7 +421,7 @@ async fn handle_callback(bot: Bot, q: CallbackQuery, state: BotContext) -> Respo
             let chat_id_str = match q.message.as_ref() {
                 Some(m) => m.chat().id.0.to_string(),
                 None => {
-                    bot.answer_callback_query(&q.id)
+                    bot.answer_callback_query(q.id.clone())
                         .text("❌ Message expired. Please use /subscribe again.")
                         .await?;
                     return Ok(());
@@ -435,7 +435,7 @@ async fn handle_callback(bot: Bot, q: CallbackQuery, state: BotContext) -> Respo
                 Ok(true) => {
                     let app_info = state.db.get_all_app_info().await.unwrap_or_default();
                     let name = resolve_app_name_short(app_id, &app_info);
-                    bot.answer_callback_query(&q.id)
+                    bot.answer_callback_query(q.id.clone())
                         .text(format!("✅ Subscribed to {name}"))
                         .await?;
                     if let Some(ref msg) = q.message {
@@ -449,13 +449,13 @@ async fn handle_callback(bot: Bot, q: CallbackQuery, state: BotContext) -> Respo
                     }
                 }
                 Ok(false) => {
-                    bot.answer_callback_query(&q.id)
+                    bot.answer_callback_query(q.id.clone())
                         .text("Already subscribed.")
                         .await?;
                 }
                 Err(e) => {
                     tracing::error!("Failed to subscribe channel to app {app_id}: {e}");
-                    bot.answer_callback_query(&q.id)
+                    bot.answer_callback_query(q.id.clone())
                         .text("❌ Something went wrong. Please try again.")
                         .await?;
                 }
@@ -469,7 +469,7 @@ async fn handle_callback(bot: Bot, q: CallbackQuery, state: BotContext) -> Respo
             let chat_id_str = match q.message.as_ref() {
                 Some(m) => m.chat().id.0.to_string(),
                 None => {
-                    bot.answer_callback_query(&q.id)
+                    bot.answer_callback_query(q.id.clone())
                         .text("❌ Message expired. Please use /unsubscribe again.")
                         .await?;
                     return Ok(());
@@ -481,14 +481,14 @@ async fn handle_callback(bot: Bot, q: CallbackQuery, state: BotContext) -> Respo
                 .await
             {
                 tracing::error!("Failed to unsubscribe channel from app {app_id}: {e}");
-                bot.answer_callback_query(&q.id)
+                bot.answer_callback_query(q.id.clone())
                     .text("❌ Something went wrong. Please try again.")
                     .await?;
                 return Ok(());
             }
             let app_info = state.db.get_all_app_info().await.unwrap_or_default();
             let name = resolve_app_name_short(app_id, &app_info);
-            bot.answer_callback_query(&q.id)
+            bot.answer_callback_query(q.id.clone())
                 .text(format!("🗑 Unsubscribed from {name}"))
                 .await?;
             if let Some(ref msg) = q.message {
@@ -509,14 +509,14 @@ async fn handle_callback(bot: Bot, q: CallbackQuery, state: BotContext) -> Respo
     {
         if let Err(e) = state.db.remove_tracked_game(app_id).await {
             tracing::error!("Failed to remove tracked game {app_id}: {e}");
-            bot.answer_callback_query(&q.id)
+            bot.answer_callback_query(q.id.clone())
                 .text("❌ Something went wrong. Please try again.")
                 .await?;
             return Ok(());
         }
         let (app_info, mem_names) = state.fetch_name_sources().await;
         let name = resolve_app_name(app_id, &app_info, &mem_names);
-        bot.answer_callback_query(&q.id)
+        bot.answer_callback_query(q.id.clone())
             .text(format!("🗑 Untracked {name}"))
             .await?;
         if let Some(msg) = q.message {

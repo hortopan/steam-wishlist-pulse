@@ -9,10 +9,10 @@ homepage = "https://github.com/hortopan/steam-wishlist-pulse"
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync", "net", "signal"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-teloxide = { version = "0.13", default-features = false, features = ["macros", "rustls"] }
+teloxide = { version = "0.17", default-features = false, features = ["macros", "rustls"] }
 axum = "0.8"
 rust-embed = { version = "8", features = ["interpolate-folder-path"] }
 mime_guess = "2"
@@ -21,14 +21,14 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 colored = "3"
 chrono = "0.4.44"
 chrono-tz = "0.10"
-rusqlite = { version = "0.34", features = ["bundled"] }
+rusqlite = { version = "0.39", features = ["bundled"] }
 dirs = "6"
 argon2 = "0.5"
 hex = "0.4"
-rand = "0.8"
-axum-extra = { version = "0.10", features = ["cookie"] }
+rand = "0.9"
+axum-extra = { version = "0.12", features = ["cookie"] }
 time = "0.3"
-jsonwebtoken = "9"
+jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors"] }
 serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "model", "rustls_backend", "cache"] }
@@ -37,5 +37,5 @@ futures = "0.3"
 aes-gcm = "0.10"
 sha2 = "0.10"
 hkdf = "0.12"
-getrandom = "0.2"
+getrandom = "0.3"
 secrecy = { version = "0.10", features = ["serde"] }

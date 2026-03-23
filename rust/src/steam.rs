@@ -85,13 +85,13 @@ struct WishlistResponseBody {
 
 #[derive(Debug, Deserialize)]
 struct WishlistSummary {
-    wishlist_adds: Option<u64>,
-    wishlist_deletes: Option<u64>,
-    wishlist_purchases: Option<u64>,
-    wishlist_gifts: Option<u64>,
-    wishlist_adds_windows: Option<u64>,
-    wishlist_adds_mac: Option<u64>,
-    wishlist_adds_linux: Option<u64>,
+    wishlist_adds: Option<i64>,
+    wishlist_deletes: Option<i64>,
+    wishlist_purchases: Option<i64>,
+    wishlist_gifts: Option<i64>,
+    wishlist_adds_windows: Option<i64>,
+    wishlist_adds_mac: Option<i64>,
+    wishlist_adds_linux: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -106,24 +106,24 @@ struct CountrySummaryEntry {
 
 #[derive(Debug, Deserialize)]
 struct CountrySummaryActions {
-    wishlist_adds: Option<u64>,
-    wishlist_deletes: Option<u64>,
-    wishlist_purchases: Option<u64>,
-    wishlist_gifts: Option<u64>,
+    wishlist_adds: Option<i64>,
+    wishlist_deletes: Option<i64>,
+    wishlist_purchases: Option<i64>,
+    wishlist_gifts: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
 pub struct WishlistReport {
     pub app_id: u32,
     pub date: String,
-    pub adds: u64,
-    pub deletes: u64,
-    pub purchases: u64,
-    pub gifts: u64,
+    pub adds: i64,
+    pub deletes: i64,
+    pub purchases: i64,
+    pub gifts: i64,
     /// Platform breakdown for adds.
-    pub adds_windows: u64,
-    pub adds_mac: u64,
-    pub adds_linux: u64,
+    pub adds_windows: i64,
+    pub adds_mac: i64,
+    pub adds_linux: i64,
     /// Per-country breakdown.
     pub countries: Vec<CountryReport>,
     /// ISO 8601 timestamp of when this snapshot was saved to the DB.
@@ -133,10 +133,10 @@ pub struct WishlistReport {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct CountryReport {
     pub country_code: String,
-    pub adds: u64,
-    pub deletes: u64,
-    pub purchases: u64,
-    pub gifts: u64,
+    pub adds: i64,
+    pub deletes: i64,
+    pub purchases: i64,
+    pub gifts: i64,
 }
 
 /// Validate a Steam Web API key by making a lightweight partner API call

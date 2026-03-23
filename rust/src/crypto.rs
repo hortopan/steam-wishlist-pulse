@@ -40,7 +40,7 @@ pub fn encrypt(secret: &SecretString, plaintext: &str) -> Result<String, String>
     let cipher = Aes256Gcm::new_from_slice(&key).map_err(|e| e.to_string())?;
 
     let mut nonce_bytes = [0u8; 12];
-    getrandom::getrandom(&mut nonce_bytes).map_err(|e| e.to_string())?;
+    getrandom::fill(&mut nonce_bytes).map_err(|e| e.to_string())?;
     let nonce = Nonce::from_slice(&nonce_bytes);
 
     let ciphertext = cipher
@@ -158,7 +158,7 @@ mod tests {
         let cipher = Aes256Gcm::new_from_slice(&key).unwrap();
 
         let mut nonce_bytes = [0u8; 12];
-        getrandom::getrandom(&mut nonce_bytes).unwrap();
+        getrandom::fill(&mut nonce_bytes).unwrap();
         let nonce = Nonce::from_slice(&nonce_bytes);
         let ciphertext = cipher.encrypt(nonce, plaintext.as_bytes()).unwrap();
 

@@ -656,7 +656,7 @@ impl Database {
     ) -> AppResult<Vec<SnapshotDelta>> {
         let conn = self.pool.get().await;
         let offset = format!("-{lookback_days} days");
-        let rows: Vec<(u64, u64, u64, u64, String)> = if let Some(cutoff) = exclude_after {
+        let rows: Vec<(i64, i64, i64, i64, String)> = if let Some(cutoff) = exclude_after {
             let mut stmt = conn.prepare(
                 "SELECT adds, deletes, purchases, gifts, fetched_at
                  FROM wishlist_snapshots
@@ -688,10 +688,10 @@ impl Database {
             if days <= 0.0 {
                 continue; // skip zero/negative time gaps (e.g. duplicate timestamps)
             }
-            let raw_adds = i64::try_from(ca).unwrap_or(i64::MAX) - i64::try_from(pa).unwrap_or(i64::MAX);
-            let raw_deletes = i64::try_from(cd).unwrap_or(i64::MAX) - i64::try_from(pd).unwrap_or(i64::MAX);
-            let raw_purchases = i64::try_from(cp).unwrap_or(i64::MAX) - i64::try_from(pp).unwrap_or(i64::MAX);
-            let raw_gifts = i64::try_from(cg).unwrap_or(i64::MAX) - i64::try_from(pg).unwrap_or(i64::MAX);
+            let raw_adds = ca - pa;
+            let raw_deletes = cd - pd;
+            let raw_purchases = cp - pp;
+            let raw_gifts = cg - pg;
             deltas.push(SnapshotDelta {
                 adds_rate: raw_adds as f64 / days,
                 deletes_rate: raw_deletes as f64 / days,
@@ -713,7 +713,7 @@ impl Database {
         let offset = format!("-{lookback_days} days");
 
         // Single query: fetch all country data with timestamps for snapshots in the window.
-        let rows: Vec<(i64, String, String, u64, u64)> = if let Some(cutoff) = exclude_after {
+        let rows: Vec<(i64, String, String, i64, i64)> = if let Some(cutoff) = exclude_after {
             let mut stmt = conn.prepare(
                 "SELECT ws.id, ws.fetched_at, sc.country_code, sc.adds, sc.deletes
                  FROM snapshot_countries sc
@@ -742,7 +742,7 @@ impl Database {
         // Group by snapshot ID, preserving order
         let mut snapshot_ids_ordered: Vec<i64> = Vec::new();
         let mut snapshot_timestamps: HashMap<i64, String> = HashMap::new();
-        let mut snapshots_countries: HashMap<i64, HashMap<String, (u64, u64)>> = HashMap::new();
+        let mut snapshots_countries: HashMap<i64, HashMap<String, (i64, i64)>> = HashMap::new();
         for (sid, fetched_at, country_code, adds, deletes) in rows {
             if !snapshots_countries.contains_key(&sid) {
                 snapshot_ids_ordered.push(sid);
@@ -778,8 +778,8 @@ impl Database {
             for country in all_countries {
                 let (pa, pd) = prev.get(country.as_str()).copied().unwrap_or((0, 0));
                 let (ca, cd) = curr.get(country.as_str()).copied().unwrap_or((0, 0));
-                let raw_adds = i64::try_from(ca).unwrap_or(i64::MAX) - i64::try_from(pa).unwrap_or(i64::MAX);
-                let raw_deletes = i64::try_from(cd).unwrap_or(i64::MAX) - i64::try_from(pd).unwrap_or(i64::MAX);
+                let raw_adds = ca - pa;
+                let raw_deletes = cd - pd;
                 result
                     .entry(country.to_string())
                     .or_default()

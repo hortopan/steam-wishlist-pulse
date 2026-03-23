@@ -64,13 +64,13 @@ struct JwtClaims {
 }
 
 fn generate_jwt_secret() -> String {
-    let mut rng = rand::thread_rng();
-    let bytes: [u8; 32] = rng.r#gen();
+    let mut rng = rand::rng();
+    let bytes: [u8; 32] = rng.random();
     hex::encode(bytes)
 }
 
 fn hash_password(password: &str) -> String {
-    let salt = SaltString::generate(&mut rand::thread_rng());
+    let salt = SaltString::generate(&mut argon2::password_hash::rand_core::OsRng);
     Argon2::default()
         .hash_password(password.as_bytes(), &salt)
         .expect("Argon2 hashing should not fail")
@@ -377,8 +377,8 @@ impl AppState {
 
     /// Build a CSRF cookie with a fresh random token.
     fn csrf_cookie(&self) -> Cookie<'static> {
-        let mut rng = rand::thread_rng();
-        let bytes: [u8; 16] = rng.r#gen();
+        let mut rng = rand::rng();
+        let bytes: [u8; 16] = rng.random();
         let token = hex::encode(bytes);
         let mut builder = Cookie::build((CSRF_COOKIE, token))
             .path("/")
@@ -628,13 +628,13 @@ struct GameReport {
     name: String,
     image_url: String,
     date: String,
-    adds: u64,
-    deletes: u64,
-    purchases: u64,
-    gifts: u64,
-    adds_windows: u64,
-    adds_mac: u64,
-    adds_linux: u64,
+    adds: i64,
+    deletes: i64,
+    purchases: i64,
+    gifts: i64,
+    adds_windows: i64,
+    adds_mac: i64,
+    adds_linux: i64,
     countries: Vec<crate::steam::CountryReport>,
     changed_at: Option<String>,
 }
@@ -647,13 +647,13 @@ struct ApiResponse {
 #[derive(Serialize)]
 struct SnapshotEntry {
     date: String,
-    adds: u64,
-    deletes: u64,
-    purchases: u64,
-    gifts: u64,
-    adds_windows: u64,
-    adds_mac: u64,
-    adds_linux: u64,
+    adds: i64,
+    deletes: i64,
+    purchases: i64,
+    gifts: i64,
+    adds_windows: i64,
+    adds_mac: i64,
+    adds_linux: i64,
     countries: Vec<crate::steam::CountryReport>,
     fetched_at: String,
     /// Whether this snapshot represents an anomalous change from the previous one (any metric).
@@ -693,7 +693,7 @@ struct AdminConfigUpdate {
     anomaly_lookback_days: Option<u32>,
     anomaly_sensitivity_up: Option<f64>,
     anomaly_sensitivity_down: Option<f64>,
-    anomaly_min_absolute: Option<u64>,
+    anomaly_min_absolute: Option<i64>,
     anomaly_mad_floor_pct: Option<f64>,
 }
 
@@ -712,7 +712,7 @@ struct AdminConfigResponse {
     anomaly_lookback_days: u32,
     anomaly_sensitivity_up: f64,
     anomaly_sensitivity_down: f64,
-    anomaly_min_absolute: u64,
+    anomaly_min_absolute: i64,
     anomaly_mad_floor_pct: f64,
 }
 
@@ -1153,12 +1153,12 @@ async fn api_game_detail(
                     let days_elapsed = crate::db::elapsed_days(prev_ts, curr_ts);
                     let days_elapsed = if days_elapsed <= 0.0 { 1.0 } else { days_elapsed };
 
-                    let check_metric = |curr_val: u64, prev_val: u64, get_vals: &dyn Fn(&crate::steam::WishlistReport) -> u64| -> bool {
-                        let raw_delta = curr_val as i64 - prev_val as i64;
+                    let check_metric = |curr_val: i64, prev_val: i64, get_vals: &dyn Fn(&crate::steam::WishlistReport) -> i64| -> bool {
+                        let raw_delta = curr_val - prev_val;
                         if raw_delta == 0 {
                             return false;
                         }
-                        if raw_delta.unsigned_abs() < anomaly_config.min_absolute {
+                        if raw_delta.abs() < anomaly_config.min_absolute {
                             return false;
                         }
                         let current_rate = raw_delta as f64 / days_elapsed;
@@ -1978,12 +1978,12 @@ async fn debug_test_change(
 
     // Generate random deltas upfront (ThreadRng is !Send, can't hold across .await)
     let (d_adds, d_deletes, d_purchases, d_gifts) = {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         (
-            rng.gen_range(1..=50u64),
-            rng.gen_range(0..=10u64),
-            rng.gen_range(0..=5u64),
-            rng.gen_range(0..=3u64),
+            rng.random_range(1..=50i64),
+            rng.random_range(0..=10i64),
+            rng.random_range(0..=5i64),
+            rng.random_range(0..=3i64),
         )
     };
 

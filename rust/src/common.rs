@@ -19,7 +19,7 @@ pub fn is_admin(user_id: u64, admin_ids: &[u64]) -> bool {
 }
 
 /// Format a signed delta value for display (e.g. "+5", "-3", "0").
-pub fn fmt_delta(new: u64, old: u64) -> String {
+pub fn fmt_delta(new: i64, old: i64) -> String {
     match new.cmp(&old) {
         Ordering::Greater => format!("+{}", new - old),
         Ordering::Less => format!("-{}", old - new),
