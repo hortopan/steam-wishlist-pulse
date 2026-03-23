@@ -2,7 +2,7 @@ use teloxide::prelude::*;
 use teloxide::types::{BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Me, ParseMode};
 use teloxide::utils::command::BotCommands;
 
-use crate::common::{BotContext, is_admin, prepare_notification, format_deltas, resolve_app_name, resolve_app_name_short};
+use crate::common::{BotContext, ChangeMessage, is_admin, prepare_notification, resolve_app_name, resolve_app_name_short};
 use crate::db::Database;
 use crate::error::{AppError, AppResult};
 use crate::steam::{SteamClient, WishlistReport};
@@ -652,16 +652,16 @@ pub async fn notify_change(
         None => return,
     };
 
-    let [adds, deletes, purchases, gifts] = format_deltas(current, previous);
+    let msg = ChangeMessage::new(ctx.app_name, current, previous);
 
     let message = format!(
-        "📊 <b>{}</b> ({app_id}) > wishlist update\n\
+        "📊 <b>{}</b> ({app_id}) > {}\n\
          \n\
-         Adds: {adds}\n\
-         Deletes: {deletes}\n\
-         Purchases: {purchases}\n\
-         Gifts: {gifts}",
-        ctx.app_name,
+         Adds: {}\n\
+         Deletes: {}\n\
+         Purchases: {}\n\
+         Gifts: {}",
+        msg.app_name, msg.header(), msg.adds, msg.deletes, msg.purchases, msg.gifts,
     );
 
     let bot = Bot::new(ctx.token);

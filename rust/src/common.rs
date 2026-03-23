@@ -132,32 +132,79 @@ pub async fn prepare_notification(
     })
 }
 
-/// Format the four delta fields for a notification.
-pub fn format_deltas(current: &WishlistReport, previous: &WishlistReport) -> [String; 4] {
-    [
-        format!(
-            "{} → {} ({})",
-            previous.adds,
-            current.adds,
-            fmt_delta(current.adds, previous.adds)
-        ),
-        format!(
-            "{} → {} ({})",
-            previous.deletes,
-            current.deletes,
-            fmt_delta(current.deletes, previous.deletes)
-        ),
-        format!(
-            "{} → {} ({})",
-            previous.purchases,
-            current.purchases,
-            fmt_delta(current.purchases, previous.purchases)
-        ),
-        format!(
-            "{} → {} ({})",
-            previous.gifts,
-            current.gifts,
-            fmt_delta(current.gifts, previous.gifts)
-        ),
-    ]
+/// Provider-agnostic wishlist change message body.
+/// Built once from the current and previous reports, then rendered by each provider.
+pub struct ChangeMessage {
+    pub app_name: String,
+    /// `true` when the update is within the same day (show deltas).
+    /// `false` on a new day (show only current values).
+    pub is_same_day: bool,
+    pub adds: String,
+    pub deletes: String,
+    pub purchases: String,
+    pub gifts: String,
+}
+
+impl ChangeMessage {
+    /// Build a change message from the notification context and the two reports.
+    pub fn new(
+        app_name: String,
+        current: &WishlistReport,
+        previous: &WishlistReport,
+    ) -> Self {
+        let is_same_day = current.date == previous.date;
+        let (adds, deletes, purchases, gifts) = if is_same_day {
+            (
+                format!(
+                    "{} → {} ({})",
+                    previous.adds,
+                    current.adds,
+                    fmt_delta(current.adds, previous.adds)
+                ),
+                format!(
+                    "{} → {} ({})",
+                    previous.deletes,
+                    current.deletes,
+                    fmt_delta(current.deletes, previous.deletes)
+                ),
+                format!(
+                    "{} → {} ({})",
+                    previous.purchases,
+                    current.purchases,
+                    fmt_delta(current.purchases, previous.purchases)
+                ),
+                format!(
+                    "{} → {} ({})",
+                    previous.gifts,
+                    current.gifts,
+                    fmt_delta(current.gifts, previous.gifts)
+                ),
+            )
+        } else {
+            (
+                current.adds.to_string(),
+                current.deletes.to_string(),
+                current.purchases.to_string(),
+                current.gifts.to_string(),
+            )
+        };
+
+        Self {
+            app_name,
+            is_same_day,
+            adds,
+            deletes,
+            purchases,
+            gifts,
+        }
+    }
+
+    /// Human-readable header describing the kind of change.
+    pub fn header(&self) -> &'static str {
+        if self.is_same_day {
+            "Wishlist update"
+        } else {
+            "New day snapshot"
+        }
+    }
 }

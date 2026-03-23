@@ -7,7 +7,7 @@ use serenity::all::{
 use serenity::async_trait;
 use serenity::Client;
 
-use crate::common::{BotContext, is_admin, prepare_notification, format_deltas, resolve_app_name_short};
+use crate::common::{BotContext, ChangeMessage, is_admin, prepare_notification, resolve_app_name_short};
 use crate::db::Database;
 use crate::error::{AppError, AppResult};
 use crate::steam::{SteamClient, WishlistReport};
@@ -488,7 +488,7 @@ pub async fn notify_change(
         None => return,
     };
 
-    let [adds, deletes, purchases, gifts] = format_deltas(current, previous);
+    let msg = ChangeMessage::new(ctx.app_name, current, previous);
 
     let http = serenity::http::Http::new(&ctx.token);
 
@@ -502,13 +502,13 @@ pub async fn notify_change(
         };
 
         let embed = CreateEmbed::new()
-            .title(format!("{} ({app_id})", ctx.app_name))
-            .description("Wishlist update")
+            .title(format!("{} ({app_id})", msg.app_name))
+            .description(msg.header())
             .color(0x1b96f3)
-            .field("Adds", &adds, true)
-            .field("Deletes", &deletes, true)
-            .field("Purchases", &purchases, true)
-            .field("Gifts", &gifts, true);
+            .field("Adds", &msg.adds, true)
+            .field("Deletes", &msg.deletes, true)
+            .field("Purchases", &msg.purchases, true)
+            .field("Gifts", &msg.gifts, true);
 
         let message = CreateMessage::new().embed(embed);
 
