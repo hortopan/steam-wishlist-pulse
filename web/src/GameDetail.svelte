@@ -232,7 +232,7 @@
     {#if data.latest && data.latest.countries.length > 0}
       {@const sortedCountries = [...data.latest.countries].sort((a, b) => b.adds - a.adds)}
       <div class="countries-section">
-        <h2>Top Countries <span class="muted-count">({data.latest.countries.length} total)</span></h2>
+        <h2>Top Countries for today <span class="muted-count">({data.latest.countries.length} total)</span></h2>
         <div class="countries-table-wrap">
           <table class="history-table">
             <thead>
