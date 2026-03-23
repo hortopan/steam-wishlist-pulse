@@ -482,15 +482,46 @@ pub async fn notify_change(
     app_id: u32,
     current: &WishlistReport,
     previous: &WishlistReport,
+    anomaly: Option<&crate::anomaly::AnomalyResult>,
 ) {
     let ctx = match prepare_notification(db, "discord", app_id).await {
         Some(ctx) => ctx,
         None => return,
     };
 
-    let msg = ChangeMessage::new(ctx.app_name, current, previous);
+    let msg = ChangeMessage::new(ctx.app_name, current, previous, anomaly);
 
     let http = serenity::http::Http::new(&ctx.token);
+
+    let color = if msg.anomaly_flags.is_some() { 0xff4444 } else { 0x1b96f3 };
+
+    let fmt_field = |name: &str, value: &str, flag: Option<&crate::common::MetricAnomalyFlag>| -> (String, String) {
+        match flag {
+            Some(f) if f.is_anomalous => (
+                format!("{name} ⚠️"),
+                format!("{value}\n*{}*", f.detail),
+            ),
+            _ => (name.to_string(), value.to_string()),
+        }
+    };
+
+    let (adds_label, adds_value, deletes_label, deletes_value, purchases_label, purchases_value, gifts_label, gifts_value) =
+        match &msg.anomaly_flags {
+            Some(f) => {
+                let (al, av) = fmt_field("Adds", &msg.adds, Some(&f.adds));
+                let (dl, dv) = fmt_field("Deletes", &msg.deletes, Some(&f.deletes));
+                let (pl, pv) = fmt_field("Purchases", &msg.purchases, Some(&f.purchases));
+                let (gl, gv) = fmt_field("Gifts", &msg.gifts, Some(&f.gifts));
+                (al, av, dl, dv, pl, pv, gl, gv)
+            }
+            None => {
+                let (al, av) = fmt_field("Adds", &msg.adds, None);
+                let (dl, dv) = fmt_field("Deletes", &msg.deletes, None);
+                let (pl, pv) = fmt_field("Purchases", &msg.purchases, None);
+                let (gl, gv) = fmt_field("Gifts", &msg.gifts, None);
+                (al, av, dl, dv, pl, pv, gl, gv)
+            }
+        };
 
     for channel_id_str in &ctx.channels {
         let channel_id: u64 = match channel_id_str.parse() {
@@ -501,14 +532,21 @@ pub async fn notify_change(
             }
         };
 
-        let embed = CreateEmbed::new()
+        let mut embed = CreateEmbed::new()
             .title(format!("{} ({app_id})", msg.app_name))
             .description(msg.header())
-            .color(0x1b96f3)
-            .field("Adds", &msg.adds, true)
-            .field("Deletes", &msg.deletes, true)
-            .field("Purchases", &msg.purchases, true)
-            .field("Gifts", &msg.gifts, true);
+            .color(color)
+            .field(&adds_label, &adds_value, true)
+            .field(&deletes_label, &deletes_value, true)
+            .field(&purchases_label, &purchases_value, true)
+            .field(&gifts_label, &gifts_value, true);
+
+        if let Some(flags) = &msg.anomaly_flags
+            && !flags.country_alerts.is_empty()
+        {
+            let alerts = flags.country_alerts.join("\n");
+            embed = embed.field("Country anomalies", &alerts, false);
+        }
 
         let message = CreateMessage::new().embed(embed);
 

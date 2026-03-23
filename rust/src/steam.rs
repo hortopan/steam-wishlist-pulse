@@ -195,7 +195,7 @@ impl SteamClient {
         app_id: u32,
         date: &str,
     ) -> AppResult<WishlistReport> {
-        tracing::info!("Requesting wishlist: {WISHLIST_API_URL}?appid={app_id}&date={date}");
+        tracing::debug!("Requesting wishlist: {WISHLIST_API_URL}?appid={app_id}&date={date}");
 
         let api_key = self.api_key.read().await.clone();
         let resp = self
@@ -209,7 +209,7 @@ impl SteamClient {
             .send()
             .await?;
 
-        tracing::info!(
+        tracing::debug!(
             "Response status: {} for app {app_id} date {date}",
             resp.status()
         );
@@ -223,7 +223,7 @@ impl SteamClient {
         }
 
         let body = resp.text().await?;
-        tracing::info!("Got wishlist response from steam for app {app_id}");
+        tracing::debug!("Got wishlist response from steam for app {app_id}");
 
         let data: WishlistApiResponse = serde_json::from_str(&body)?;
 

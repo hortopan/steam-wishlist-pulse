@@ -28,6 +28,10 @@
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
   let tickTimer: ReturnType<typeof setInterval> | null = null;
 
+  // Pagination: show latest N entries at a time
+  const PAGE_SIZE = 24;
+  let visibleCount = $state(PAGE_SIZE);
+
   // Animation: track which stats changed on last poll
   let flashMetrics = $state<Set<string>>(new Set());
   let flashRows = $state<Set<string>>(new Set());
@@ -154,7 +158,7 @@
     {#if data.latest}
       <div class="stats-row">
         <div class="stat-card stat-adds" class:flash={flashMetrics.has("adds")}>
-          <div class="stat-big-value">+{data.latest.adds.toLocaleString()}</div>
+          <div class="stat-big-value">{data.latest.adds.toLocaleString()}</div>
           <div class="stat-big-label">Wishlist Adds</div>
         </div>
         <div
@@ -162,7 +166,7 @@
           class:flash={flashMetrics.has("deletes")}
         >
           <div class="stat-big-value">
-            {data.latest.deletes > 0 ? "-" : ""}{data.latest.deletes.toLocaleString()}
+            {data.latest.deletes.toLocaleString()}
           </div>
           <div class="stat-big-label">Wishlist Deletes</div>
         </div>
@@ -225,8 +229,11 @@
       </div>
     {/if}
 
+    <!-- Chart + History use paginated slice (latest N entries) -->
+    {@const visibleHistory = data.history.length > visibleCount ? data.history.slice(data.history.length - visibleCount) : data.history}
+
     <!-- Chart -->
-    <Chart history={data.history} />
+    <Chart history={visibleHistory} />
 
     <!-- Top Countries (latest snapshot) -->
     {#if data.latest && data.latest.countries.length > 0}
@@ -248,8 +255,8 @@
               {#each sortedCountries.slice(0, 20) as country}
                 <tr>
                   <td class="country-cell"><span class="country-flag">{countryFlag(country.country_code)}</span> {country.country_code}</td>
-                  <td class="num adds">+{country.adds.toLocaleString()}</td>
-                  <td class="num deletes">{country.deletes > 0 ? "-" : ""}{country.deletes.toLocaleString()}</td>
+                  <td class="num adds">{country.adds.toLocaleString()}</td>
+                  <td class="num deletes">{country.deletes.toLocaleString()}</td>
                   <td class="num purchases">{country.purchases.toLocaleString()}</td>
                   <td class="num gifts">{country.gifts.toLocaleString()}</td>
                 </tr>
@@ -263,7 +270,7 @@
     <!-- Snapshot History Table -->
     {#if data.history.length > 0}
       <div class="history-section">
-        <h2>Snapshot History</h2>
+        <h2>Snapshot History <span class="muted-count">({data.history.length} total{data.history.length > visibleCount ? `, showing latest ${visibleCount}` : ""})</span></h2>
         <div class="history-table-wrap">
           <table class="history-table">
             <thead>
@@ -280,11 +287,14 @@
               </tr>
             </thead>
             <tbody>
-              {#each [...data.history].reverse() as entry}
-                <tr class:flash-row={flashRows.has(entry.date)}>
-                  <td>{entry.date.split("T")[0]}</td>
-                  <td class="num adds">+{entry.adds.toLocaleString()}</td>
-                  <td class="num deletes">{entry.deletes > 0 ? "-" : ""}{entry.deletes.toLocaleString()}</td>
+              {#each [...visibleHistory].reverse() as entry}
+                <tr class:flash-row={flashRows.has(entry.date)} class:anomaly-row={entry.is_anomaly}>
+                  <td>
+                    {#if entry.is_anomaly}<span class="anomaly-badge" title="Anomalous change detected">&#9888;</span>{/if}
+                    {entry.date.split("T")[0]}
+                  </td>
+                  <td class="num adds">{entry.adds.toLocaleString()}</td>
+                  <td class="num deletes">{entry.deletes.toLocaleString()}</td>
                   <td class="num purchases">{entry.purchases.toLocaleString()}</td>
                   <td class="num gifts">{entry.gifts.toLocaleString()}</td>
                   <td class="num platform-val">{entry.adds_windows.toLocaleString()}</td>
@@ -300,6 +310,12 @@
             </tbody>
           </table>
         </div>
+        {#if data.history.length > visibleCount}
+          <button class="load-more-btn" onclick={() => visibleCount += PAGE_SIZE}>
+            Show {Math.min(PAGE_SIZE, data.history.length - visibleCount)} more entries
+            <span class="load-more-remaining">({data.history.length - visibleCount} remaining)</span>
+          </button>
+        {/if}
       </div>
     {/if}
   {/if}
@@ -740,6 +756,49 @@
   .history-table td.muted {
     color: var(--text-muted);
     font-size: 0.8rem;
+  }
+
+  .history-table tbody tr.anomaly-row {
+    background: rgba(239, 68, 68, 0.06);
+    border-left: 3px solid var(--red);
+  }
+
+  .history-table tbody tr.anomaly-row:hover {
+    background: rgba(239, 68, 68, 0.1);
+  }
+
+  .anomaly-badge {
+    color: var(--red);
+    font-size: 0.85rem;
+    margin-right: 0.3rem;
+    cursor: help;
+  }
+
+  .load-more-btn {
+    display: block;
+    width: 100%;
+    margin-top: 1rem;
+    padding: 0.7rem 1rem;
+    background: rgba(99, 102, 241, 0.1);
+    border: 1px solid var(--accent);
+    border-radius: 0.5rem;
+    color: var(--accent);
+    font-size: 0.85rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.2s, color 0.2s;
+  }
+
+  .load-more-btn:hover {
+    background: rgba(99, 102, 241, 0.2);
+    color: var(--text);
+  }
+
+  .load-more-remaining {
+    color: var(--text-muted);
+    font-weight: 400;
+    font-size: 0.8rem;
+    margin-left: 0.25rem;
   }
 
   .history-table tbody tr:hover {

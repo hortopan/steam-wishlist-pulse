@@ -12,6 +12,7 @@
     entry: SnapshotEntry;
     metric: string;
     value: number;
+    prevValue: number | null;
   } | null>(null);
 
   const CHART_W = 800;
@@ -59,13 +60,15 @@
           cy: number;
           entry: SnapshotEntry;
           value: number;
+          prevValue: number | null;
         }[];
       }
     > = {};
     for (const m of activeKeys) {
       const pts = entries.map((e, i) => {
         const v = (e as any)[m] as number;
-        return { cx: xScale(i), cy: yScale(v), entry: e, value: v };
+        const pv = i > 0 ? ((entries[i - 1] as any)[m] as number) : null;
+        return { cx: xScale(i), cy: yScale(v), entry: e, value: v, prevValue: pv };
       });
       const d = pts
         .map((p, i) => `${i === 0 ? "M" : "L"}${p.cx},${p.cy}`)
@@ -173,6 +176,18 @@
             opacity="0.9"
           />
           {#each pathData.points as pt}
+            {@const isMetricAnomaly = pt.entry.anomaly_metrics?.[metric as keyof typeof pt.entry.anomaly_metrics] ?? false}
+            {#if isMetricAnomaly}
+              <circle
+                cx={pt.cx}
+                cy={pt.cy}
+                r="10"
+                fill="none"
+                stroke="var(--red, #ef4444)"
+                stroke-width="2"
+                opacity="0.5"
+              />
+            {/if}
             <!-- svelte-ignore a11y_no_static_element_interactions -->
             <circle
               cx={pt.cx}
@@ -182,7 +197,7 @@
                 ? 6
                 : 4}
               fill={METRIC_CONFIG[metric].color}
-              stroke="var(--surface)"
+              stroke={isMetricAnomaly ? "var(--red, #ef4444)" : "var(--surface)"}
               stroke-width="2"
               style="cursor: pointer;"
               onmouseenter={() =>
@@ -192,6 +207,7 @@
                   entry: pt.entry,
                   metric,
                   value: pt.value,
+                  prevValue: pt.prevValue,
                 })}
             />
           {/each}
@@ -212,14 +228,18 @@
         >
           <div class="tooltip-date">
             {hoveredPoint.entry.date.split("T")[0]}
+            {#if hoveredPoint.entry.anomaly_metrics?.[hoveredPoint.metric as keyof typeof hoveredPoint.entry.anomaly_metrics]}<span class="tooltip-anomaly">&#9888; Anomaly</span>{/if}
           </div>
           <div
             class="tooltip-value"
             style="color: {METRIC_CONFIG[hoveredPoint.metric].color}"
           >
-            {METRIC_CONFIG[hoveredPoint.metric]
-              .prefix}{hoveredPoint.value.toLocaleString()}
+            {hoveredPoint.value.toLocaleString()}
             {METRIC_CONFIG[hoveredPoint.metric].label}
+            {#if hoveredPoint.prevValue !== null}
+              {@const delta = hoveredPoint.value - hoveredPoint.prevValue}
+              <span class="tooltip-delta" class:positive={delta > 0} class:negative={delta < 0}>({delta > 0 ? '+' : ''}{delta.toLocaleString()})</span>
+            {/if}
           </div>
         </div>
       {/if}
@@ -329,10 +349,31 @@
     margin-bottom: 0.2rem;
   }
 
+  .tooltip-anomaly {
+    color: var(--red, #ef4444);
+    font-weight: 600;
+    margin-left: 0.35rem;
+  }
+
   .tooltip-value {
     font-size: 0.85rem;
     font-weight: 600;
     font-variant-numeric: tabular-nums;
+  }
+
+  .tooltip-delta {
+    font-size: 0.75rem;
+    font-weight: 500;
+    margin-left: 0.3rem;
+    color: var(--text-muted);
+  }
+
+  .tooltip-delta.positive {
+    color: var(--green);
+  }
+
+  .tooltip-delta.negative {
+    color: var(--red);
   }
 
   .chart-placeholder {

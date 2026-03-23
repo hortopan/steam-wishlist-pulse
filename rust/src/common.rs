@@ -1,6 +1,7 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
+use crate::anomaly::AnomalyResult;
 use crate::db::Database;
 use crate::steam::{AppInfo, SteamClient, WishlistReport};
 
@@ -132,6 +133,23 @@ pub async fn prepare_notification(
     })
 }
 
+/// Detail for a single anomalous metric.
+pub struct MetricAnomalyFlag {
+    pub is_anomalous: bool,
+    /// Human-readable context, e.g. "avg: 12, threshold: 24". Empty if not anomalous.
+    pub detail: String,
+}
+
+/// Flags indicating which metrics are anomalous, with context.
+pub struct AnomalyFlags {
+    pub adds: MetricAnomalyFlag,
+    pub deletes: MetricAnomalyFlag,
+    pub purchases: MetricAnomalyFlag,
+    pub gifts: MetricAnomalyFlag,
+    /// Human-readable country anomaly alerts (e.g. "DE: +245 adds (avg: 12)").
+    pub country_alerts: Vec<String>,
+}
+
 /// Provider-agnostic wishlist change message body.
 /// Built once from the current and previous reports, then rendered by each provider.
 pub struct ChangeMessage {
@@ -143,6 +161,8 @@ pub struct ChangeMessage {
     pub deletes: String,
     pub purchases: String,
     pub gifts: String,
+    /// Anomaly information, if detection was run.
+    pub anomaly_flags: Option<AnomalyFlags>,
 }
 
 impl ChangeMessage {
@@ -151,6 +171,7 @@ impl ChangeMessage {
         app_name: String,
         current: &WishlistReport,
         previous: &WishlistReport,
+        anomaly: Option<&AnomalyResult>,
     ) -> Self {
         let is_same_day = current.date == previous.date;
         let (adds, deletes, purchases, gifts) = if is_same_day {
@@ -189,6 +210,57 @@ impl ChangeMessage {
             )
         };
 
+        let anomaly_flags = anomaly.and_then(|a| {
+            if !a.is_anomalous || a.insufficient_data {
+                return None;
+            }
+
+            let make_flag = |name: &str| -> MetricAnomalyFlag {
+                if let Some(m) = a.metrics.iter().find(|m| m.name == name) {
+                    if m.is_anomalous {
+                        MetricAnomalyFlag {
+                            is_anomalous: true,
+                            detail: format!(
+                                "delta: {} ({:.1}/day), median: {:.1}/day, MAD: {:.1}, range: [{:.0}, {:.0}]",
+                                m.current_delta, m.current_rate, m.mean, m.std_dev,
+                                m.threshold_low, m.threshold_high,
+                            ),
+                        }
+                    } else {
+                        MetricAnomalyFlag {
+                            is_anomalous: false,
+                            detail: String::new(),
+                        }
+                    }
+                } else {
+                    MetricAnomalyFlag {
+                        is_anomalous: false,
+                        detail: String::new(),
+                    }
+                }
+            };
+
+            let country_alerts: Vec<String> = a
+                .country_anomalies
+                .iter()
+                .map(|c| {
+                    let sign = if c.current_delta >= 0 { "+" } else { "" };
+                    format!(
+                        "{}: {}{} {} (median: {:.1}, MAD: {:.1})",
+                        c.country_code, sign, c.current_delta, c.metric, c.mean, c.std_dev
+                    )
+                })
+                .collect();
+
+            Some(AnomalyFlags {
+                adds: make_flag("adds"),
+                deletes: make_flag("deletes"),
+                purchases: make_flag("purchases"),
+                gifts: make_flag("gifts"),
+                country_alerts,
+            })
+        });
+
         Self {
             app_name,
             is_same_day,
@@ -196,12 +268,15 @@ impl ChangeMessage {
             deletes,
             purchases,
             gifts,
+            anomaly_flags,
         }
     }
 
     /// Human-readable header describing the kind of change.
     pub fn header(&self) -> &'static str {
-        if self.is_same_day {
+        if self.anomaly_flags.is_some() {
+            "Anomaly detected"
+        } else if self.is_same_day {
             "Wishlist update"
         } else {
             "New day snapshot"

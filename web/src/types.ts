@@ -22,6 +22,13 @@ export interface GameReport {
   changed_at: string | null;
 }
 
+export interface AnomalyMetrics {
+  adds: boolean;
+  deletes: boolean;
+  purchases: boolean;
+  gifts: boolean;
+}
+
 export interface SnapshotEntry {
   date: string;
   adds: number;
@@ -33,6 +40,8 @@ export interface SnapshotEntry {
   adds_linux: number;
   countries: CountryEntry[];
   fetched_at: string;
+  is_anomaly: boolean;
+  anomaly_metrics: AnomalyMetrics;
 }
 
 export interface GameDetailResponse {

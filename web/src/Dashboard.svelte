@@ -171,11 +171,11 @@
           </div>
           <div class="stats">
             <div class="stat stat-adds">
-              <span class="stat-value">+{game.adds.toLocaleString()}</span>
+              <span class="stat-value">{game.adds.toLocaleString()}</span>
               <span class="stat-label">Adds</span>
             </div>
             <div class="stat stat-deletes">
-              <span class="stat-value">{game.deletes > 0 ? "-" : ""}{game.deletes.toLocaleString()}</span>
+              <span class="stat-value">{game.deletes.toLocaleString()}</span>
               <span class="stat-label">Deletes</span>
             </div>
             <div class="stat stat-purchases">

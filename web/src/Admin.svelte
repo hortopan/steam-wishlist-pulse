@@ -19,8 +19,66 @@
   let discordAdminIds = $state("");
   let discordEnabled = $state(false);
   let trackingRetentionDays = $state(90);
+  let notificationMode = $state("every_update");
+  let anomalyLookbackDays = $state(14);
+  let anomalySensitivityUp = $state(2.0);
+  let anomalySensitivityDown = $state(2.0);
+  let anomalyMinAbsolute = $state(5);
+  let anomalyMadFloorPct = $state(0.05);
 
-  let activeTab = $state<"games" | "steam" | "telegram" | "discord" | "passwords">("games");
+  // Anomaly detection presets
+  const anomalyPresets: Record<string, { label: string; description: string; lookback: number; up: number; down: number; minAbs: number; madFloor: number }> = {
+    relaxed: {
+      label: "Relaxed",
+      description: "Only flags large, obvious spikes. Best for noisy games with frequent wishlist churn.",
+      lookback: 14, up: 3.0, down: 3.0, minAbs: 10, madFloor: 0.10,
+    },
+    balanced: {
+      label: "Balanced",
+      description: "Good default for most games. Catches meaningful changes without too much noise.",
+      lookback: 14, up: 2.0, down: 2.0, minAbs: 5, madFloor: 0.05,
+    },
+    sensitive: {
+      label: "Sensitive",
+      description: "Catches smaller changes early. Good for low-traffic games or when you want early warnings.",
+      lookback: 7, up: 1.5, down: 1.5, minAbs: 2, madFloor: 0.02,
+    },
+    aggressive: {
+      label: "Very Sensitive",
+      description: "Flags nearly any deviation from the baseline. Expect more alerts, best for critical monitoring.",
+      lookback: 7, up: 1.0, down: 1.0, minAbs: 1, madFloor: 0.0,
+    },
+    custom: {
+      label: "Custom",
+      description: "Manually configure all parameters below.",
+      lookback: 14, up: 2.0, down: 2.0, minAbs: 5, madFloor: 0.05,
+    },
+  };
+
+  let anomalyPreset = $state("balanced");
+
+  function detectPreset(): string {
+    for (const [key, p] of Object.entries(anomalyPresets)) {
+      if (key === "custom") continue;
+      if (p.lookback === anomalyLookbackDays && p.up === anomalySensitivityUp && p.down === anomalySensitivityDown && p.minAbs === anomalyMinAbsolute && p.madFloor === anomalyMadFloorPct) {
+        return key;
+      }
+    }
+    return "custom";
+  }
+
+  function applyPreset(key: string) {
+    anomalyPreset = key;
+    if (key === "custom") return;
+    const p = anomalyPresets[key];
+    anomalyLookbackDays = p.lookback;
+    anomalySensitivityUp = p.up;
+    anomalySensitivityDown = p.down;
+    anomalyMinAbsolute = p.minAbs;
+    anomalyMadFloorPct = p.madFloor;
+  }
+
+  let activeTab = $state<"games" | "steam" | "alerts" | "telegram" | "discord" | "passwords">("games");
 
   let loading = $state(true);
   let saving = $state(false);
@@ -65,6 +123,13 @@
       discordAdminIds = data.discord_admin_ids || "";
       discordEnabled = data.discord_enabled || false;
       trackingRetentionDays = data.tracking_retention_days || 90;
+      notificationMode = data.notification_mode || "every_update";
+      anomalyLookbackDays = data.anomaly_lookback_days ?? 14;
+      anomalySensitivityUp = data.anomaly_sensitivity_up ?? 2.0;
+      anomalySensitivityDown = data.anomaly_sensitivity_down ?? 2.0;
+      anomalyMinAbsolute = data.anomaly_min_absolute ?? 5;
+      anomalyMadFloorPct = data.anomaly_mad_floor_pct ?? 0.05;
+      anomalyPreset = detectPreset();
     } catch (e: any) {
       if (e instanceof AuthError) { onLogout(); return; }
       showToast("error", e.message);
@@ -83,6 +148,12 @@
         discord_admin_ids: discordAdminIds,
         discord_enabled: discordEnabled,
         tracking_retention_days: trackingRetentionDays,
+        notification_mode: notificationMode,
+        anomaly_lookback_days: anomalyLookbackDays,
+        anomaly_sensitivity_up: anomalySensitivityUp,
+        anomaly_sensitivity_down: anomalySensitivityDown,
+        anomaly_min_absolute: anomalyMinAbsolute,
+        anomaly_mad_floor_pct: anomalyMadFloorPct,
       };
       if (steamApiKey) body.steam_api_key = steamApiKey;
       if (telegramBotToken) body.telegram_bot_token = telegramBotToken;
@@ -124,6 +195,7 @@
 {#if loading}
   <div class="loading">Loading configuration...</div>
 {:else}
+  <div class="tabs-wrapper">
   <div class="tabs">
     <button
       class="tab"
@@ -134,6 +206,11 @@
       class="tab"
       class:active={activeTab === "steam"}
       onclick={() => (activeTab = "steam")}>Steam{#if health}<span class="tab-status {health.steam.status === 'ok' ? 'status-ok' : health.steam.status === 'disabled' ? '' : 'status-error'}">{health.steam.status === 'ok' ? '\u2713' : health.steam.status === 'disabled' ? '' : '\u26A0'}</span>{/if}</button
+    >
+    <button
+      class="tab"
+      class:active={activeTab === "alerts"}
+      onclick={() => (activeTab = "alerts")}>Alerts</button
     >
     <button
       class="tab"
@@ -150,6 +227,7 @@
       class:active={activeTab === "passwords"}
       onclick={() => (activeTab = "passwords")}>Access &amp; Passwords</button
     >
+  </div>
   </div>
 
   <div class="tab-content">
@@ -211,6 +289,157 @@
               >Snapshots older than this will be automatically purged</span
             >
           </div>
+
+          <button type="submit" class="save-btn" disabled={saving}>
+            {saving ? "Saving..." : "Save Configuration"}
+          </button>
+        </form>
+      </section>
+    {:else if activeTab === "alerts"}
+      <section class="config-section">
+        <h2>Alerts</h2>
+        <p class="section-desc">
+          Control when notifications are sent to Telegram and Discord.
+        </p>
+        <form onsubmit={saveConfig}>
+          <div class="form-group" role="radiogroup" aria-labelledby="notification-mode-label">
+            <!-- svelte-ignore a11y_label_has_associated_control -->
+            <label id="notification-mode-label">Notification Mode</label>
+            <div class="radio-group">
+              <label class="radio-label">
+                <input
+                  type="radio"
+                  name="notification-mode"
+                  value="every_update"
+                  bind:group={notificationMode}
+                  disabled={saving}
+                />
+                <span><strong>Every update</strong> — notify on every detected change</span>
+              </label>
+              <label class="radio-label">
+                <input
+                  type="radio"
+                  name="notification-mode"
+                  value="anomalies_only"
+                  bind:group={notificationMode}
+                  disabled={saving}
+                />
+                <span><strong>Anomalies only</strong> — only notify when unusual activity is detected</span>
+              </label>
+            </div>
+            <span class="form-hint">
+              In "every update" mode, anomalous metrics are still highlighted in notifications.
+              In "anomalies only" mode, normal updates are recorded silently.
+            </span>
+          </div>
+
+          <h2 class="mt">Anomaly Detection</h2>
+          <p class="section-desc">
+            Fine-tune how anomalies are detected. These settings apply regardless of notification mode.
+          </p>
+
+          <div class="form-group">
+            <!-- svelte-ignore a11y_label_has_associated_control -->
+            <label>Sensitivity Preset</label>
+            <div class="preset-cards">
+              {#each Object.entries(anomalyPresets) as [key, preset]}
+                <button
+                  type="button"
+                  class="preset-card"
+                  class:preset-active={anomalyPreset === key}
+                  disabled={saving}
+                  onclick={() => applyPreset(key)}
+                >
+                  <span class="preset-name">{preset.label}</span>
+                  <span class="preset-desc">{preset.description}</span>
+                </button>
+              {/each}
+            </div>
+          </div>
+
+          {#if anomalyPreset === "custom"}
+          <div class="advanced-fields">
+            <div class="form-group">
+              <label for="anomaly-lookback">Lookback Period (days)</label>
+              <input
+                id="anomaly-lookback"
+                type="number"
+                min="1"
+                max="90"
+                bind:value={anomalyLookbackDays}
+                oninput={() => anomalyPreset = "custom"}
+                disabled={saving}
+              />
+              <span class="form-hint">
+                Number of days of historical data used to compute the baseline (median). More days = more stable baseline.
+              </span>
+            </div>
+
+            <div class="form-group">
+              <label for="anomaly-sensitivity-up">Sensitivity — Spikes (upward)</label>
+              <input
+                id="anomaly-sensitivity-up"
+                type="number"
+                min="0.1"
+                step="0.1"
+                bind:value={anomalySensitivityUp}
+                oninput={() => anomalyPreset = "custom"}
+                disabled={saving}
+              />
+              <span class="form-hint">
+                Modified z-score threshold for upward deviations (spikes). Lower = more sensitive.
+              </span>
+            </div>
+
+            <div class="form-group">
+              <label for="anomaly-sensitivity-down">Sensitivity — Drops (downward)</label>
+              <input
+                id="anomaly-sensitivity-down"
+                type="number"
+                min="0.1"
+                step="0.1"
+                bind:value={anomalySensitivityDown}
+                oninput={() => anomalyPreset = "custom"}
+                disabled={saving}
+              />
+              <span class="form-hint">
+                Modified z-score threshold for downward deviations (drops). Set lower than the spike threshold to be more sensitive to drops.
+              </span>
+            </div>
+
+            <div class="form-group">
+              <label for="anomaly-min-abs">Minimum Absolute Change</label>
+              <input
+                id="anomaly-min-abs"
+                type="number"
+                min="1"
+                bind:value={anomalyMinAbsolute}
+                oninput={() => anomalyPreset = "custom"}
+                disabled={saving}
+              />
+              <span class="form-hint">
+                Minimum absolute change required to trigger an anomaly. Ignored when baseline is near zero.
+              </span>
+            </div>
+
+            <div class="form-group">
+              <label for="anomaly-mad-floor">MAD Floor (%)</label>
+              <input
+                id="anomaly-mad-floor"
+                type="number"
+                min="0"
+                max="1"
+                step="0.01"
+                bind:value={anomalyMadFloorPct}
+                oninput={() => anomalyPreset = "custom"}
+                disabled={saving}
+              />
+              <span class="form-hint">
+                Minimum MAD as a fraction of the median (0.05 = 5%). Prevents false positives when the baseline is very stable.
+              </span>
+            </div>
+          </div>
+          {/if}
 
           <button type="submit" class="save-btn" disabled={saving}>
             {saving ? "Saving..." : "Save Configuration"}
@@ -414,10 +643,33 @@
     font-size: 1.1rem;
   }
 
+  .tabs-wrapper {
+    position: relative;
+    margin-bottom: 1.5rem;
+  }
+
+  .tabs-wrapper::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: 2.5rem;
+    background: linear-gradient(to right, transparent, var(--bg, #1a1d23));
+    pointer-events: none;
+    opacity: 1;
+    transition: opacity 0.2s;
+  }
+
+  @media (min-width: 601px) {
+    .tabs-wrapper::after {
+      display: none;
+    }
+  }
+
   .tabs {
     display: flex;
     gap: 0.25rem;
-    margin-bottom: 1.5rem;
     border-bottom: 1px solid var(--border);
     padding-bottom: 0;
     overflow-x: auto;
@@ -665,5 +917,85 @@
       opacity: 0;
       transform: translateY(-0.75rem);
     }
+  }
+
+  .advanced-fields {
+    margin-top: 0.25rem;
+    padding: 1rem;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+  }
+
+  .preset-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 0.5rem;
+  }
+
+  .preset-card {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    padding: 0.75rem;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+    cursor: pointer;
+    text-align: left;
+    transition: border-color 0.2s, background 0.2s;
+    color: var(--text-muted);
+  }
+
+  .preset-card:hover:not(:disabled) {
+    border-color: var(--text-muted);
+  }
+
+  .preset-card.preset-active {
+    border-color: var(--accent);
+    background: rgba(99, 102, 241, 0.08);
+    color: var(--text);
+  }
+
+  .preset-card:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .preset-name {
+    font-size: 0.9rem;
+    font-weight: 600;
+  }
+
+  .preset-active .preset-name {
+    color: var(--accent);
+  }
+
+  .preset-desc {
+    font-size: 0.75rem;
+    line-height: 1.35;
+  }
+
+  .radio-group {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    margin-bottom: 0.25rem;
+  }
+
+  .radio-label {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+    cursor: pointer;
+    font-size: 0.9rem;
+    color: var(--text);
+    line-height: 1.4;
+  }
+
+  .radio-label input[type="radio"] {
+    margin-top: 0.2rem;
+    accent-color: var(--accent);
+    flex-shrink: 0;
   }
 </style>

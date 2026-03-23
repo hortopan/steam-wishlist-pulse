@@ -576,6 +576,186 @@ impl Database {
         }
         Ok(reports)
     }
+
+    // ── Anomaly detection queries ──────────────────────────────────────
+
+    /// Fetch pairwise deltas between consecutive snapshots within the lookback window.
+    /// Fetch time-normalized pairwise deltas (rates per day) within the lookback window.
+    ///
+    /// Each delta is normalized by the actual time elapsed between consecutive snapshots,
+    /// so the baseline is comparable regardless of polling frequency.
+    pub async fn get_recent_deltas(
+        &self,
+        app_id: u32,
+        lookback_days: u32,
+        exclude_after: Option<&str>,
+    ) -> AppResult<Vec<SnapshotDelta>> {
+        let conn = self.conn.lock().await;
+        let offset = format!("-{lookback_days} days");
+        let rows: Vec<(u64, u64, u64, u64, String)> = if let Some(cutoff) = exclude_after {
+            let mut stmt = conn.prepare(
+                "SELECT adds, deletes, purchases, gifts, fetched_at
+                 FROM wishlist_snapshots
+                 WHERE app_id = ?1 AND fetched_at >= datetime('now', ?2) AND fetched_at <= ?3
+                 ORDER BY fetched_at ASC",
+            )?;
+            stmt.query_map(rusqlite::params![app_id, offset, cutoff], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+        } else {
+            let mut stmt = conn.prepare(
+                "SELECT adds, deletes, purchases, gifts, fetched_at
+                 FROM wishlist_snapshots
+                 WHERE app_id = ?1 AND fetched_at >= datetime('now', ?2)
+                 ORDER BY fetched_at ASC",
+            )?;
+            stmt.query_map(rusqlite::params![app_id, offset], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+        };
+
+        let mut deltas = Vec::with_capacity(rows.len().saturating_sub(1));
+        for pair in rows.windows(2) {
+            let (pa, pd, pp, pg, ref prev_ts) = pair[0];
+            let (ca, cd, cp, cg, ref curr_ts) = pair[1];
+            let days = elapsed_days(prev_ts, curr_ts);
+            if days <= 0.0 {
+                continue; // skip zero/negative time gaps (e.g. duplicate timestamps)
+            }
+            let raw_adds = i64::try_from(ca).unwrap_or(i64::MAX) - i64::try_from(pa).unwrap_or(i64::MAX);
+            let raw_deletes = i64::try_from(cd).unwrap_or(i64::MAX) - i64::try_from(pd).unwrap_or(i64::MAX);
+            let raw_purchases = i64::try_from(cp).unwrap_or(i64::MAX) - i64::try_from(pp).unwrap_or(i64::MAX);
+            let raw_gifts = i64::try_from(cg).unwrap_or(i64::MAX) - i64::try_from(pg).unwrap_or(i64::MAX);
+            deltas.push(SnapshotDelta {
+                adds_rate: raw_adds as f64 / days,
+                deletes_rate: raw_deletes as f64 / days,
+                purchases_rate: raw_purchases as f64 / days,
+                gifts_rate: raw_gifts as f64 / days,
+            });
+        }
+        Ok(deltas)
+    }
+
+    /// Fetch time-normalized pairwise country-level deltas (rates per day) within the lookback window.
+    pub async fn get_recent_country_deltas(
+        &self,
+        app_id: u32,
+        lookback_days: u32,
+        exclude_after: Option<&str>,
+    ) -> AppResult<HashMap<String, Vec<CountryDelta>>> {
+        let conn = self.conn.lock().await;
+        let offset = format!("-{lookback_days} days");
+
+        // Single query: fetch all country data with timestamps for snapshots in the window.
+        let rows: Vec<(i64, String, String, u64, u64)> = if let Some(cutoff) = exclude_after {
+            let mut stmt = conn.prepare(
+                "SELECT ws.id, ws.fetched_at, sc.country_code, sc.adds, sc.deletes
+                 FROM snapshot_countries sc
+                 JOIN wishlist_snapshots ws ON ws.id = sc.snapshot_id
+                 WHERE ws.app_id = ?1 AND ws.fetched_at >= datetime('now', ?2) AND ws.fetched_at <= ?3
+                 ORDER BY ws.fetched_at ASC, sc.country_code ASC",
+            )?;
+            stmt.query_map(rusqlite::params![app_id, offset, cutoff], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+        } else {
+            let mut stmt = conn.prepare(
+                "SELECT ws.id, ws.fetched_at, sc.country_code, sc.adds, sc.deletes
+                 FROM snapshot_countries sc
+                 JOIN wishlist_snapshots ws ON ws.id = sc.snapshot_id
+                 WHERE ws.app_id = ?1 AND ws.fetched_at >= datetime('now', ?2)
+                 ORDER BY ws.fetched_at ASC, sc.country_code ASC",
+            )?;
+            stmt.query_map(rusqlite::params![app_id, offset], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+        };
+
+        // Group by snapshot ID, preserving order
+        let mut snapshot_ids_ordered: Vec<i64> = Vec::new();
+        let mut snapshot_timestamps: HashMap<i64, String> = HashMap::new();
+        let mut snapshots_countries: HashMap<i64, HashMap<String, (u64, u64)>> = HashMap::new();
+        for (sid, fetched_at, country_code, adds, deletes) in rows {
+            if !snapshots_countries.contains_key(&sid) {
+                snapshot_ids_ordered.push(sid);
+                snapshot_timestamps.insert(sid, fetched_at);
+            }
+            snapshots_countries
+                .entry(sid)
+                .or_default()
+                .insert(country_code, (adds, deletes));
+        }
+
+        if snapshot_ids_ordered.len() < 2 {
+            return Ok(HashMap::new());
+        }
+
+        // Compute pairwise deltas per country, normalized by time elapsed
+        let mut result: HashMap<String, Vec<CountryDelta>> = HashMap::new();
+        for pair in snapshot_ids_ordered.windows(2) {
+            let prev_ts = &snapshot_timestamps[&pair[0]];
+            let curr_ts = &snapshot_timestamps[&pair[1]];
+            let days = elapsed_days(prev_ts, curr_ts);
+            if days <= 0.0 {
+                continue;
+            }
+
+            let empty = HashMap::new();
+            let prev = snapshots_countries.get(&pair[0]).unwrap_or(&empty);
+            let curr = snapshots_countries.get(&pair[1]).unwrap_or(&empty);
+
+            let all_countries: std::collections::HashSet<&String> =
+                prev.keys().chain(curr.keys()).collect();
+
+            for country in all_countries {
+                let (pa, pd) = prev.get(country.as_str()).copied().unwrap_or((0, 0));
+                let (ca, cd) = curr.get(country.as_str()).copied().unwrap_or((0, 0));
+                let raw_adds = i64::try_from(ca).unwrap_or(i64::MAX) - i64::try_from(pa).unwrap_or(i64::MAX);
+                let raw_deletes = i64::try_from(cd).unwrap_or(i64::MAX) - i64::try_from(pd).unwrap_or(i64::MAX);
+                result
+                    .entry(country.to_string())
+                    .or_default()
+                    .push(CountryDelta {
+                        adds_rate: raw_adds as f64 / days,
+                        deletes_rate: raw_deletes as f64 / days,
+                    });
+            }
+        }
+
+        Ok(result)
+    }
+}
+
+/// Compute elapsed days between two ISO 8601 timestamps.
+pub fn elapsed_days(from: &str, to: &str) -> f64 {
+    use chrono::NaiveDateTime;
+    let parse = |s: &str| {
+        NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%SZ")
+            .or_else(|_| NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S"))
+            .ok()
+    };
+    match (parse(from), parse(to)) {
+        (Some(a), Some(b)) => (b - a).num_seconds() as f64 / 86400.0,
+        _ => 0.0,
+    }
+}
+
+/// Snapshot-to-snapshot delta rate (per day) for anomaly detection.
+pub struct SnapshotDelta {
+    pub adds_rate: f64,
+    pub deletes_rate: f64,
+    pub purchases_rate: f64,
+    pub gifts_rate: f64,
+}
+
+/// Country-level delta rate (per day) for anomaly detection.
+pub struct CountryDelta {
+    pub adds_rate: f64,
+    pub deletes_rate: f64,
 }
 
 /// Determine the default database path for the current platform.

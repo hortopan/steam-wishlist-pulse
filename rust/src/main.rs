@@ -1,3 +1,4 @@
+mod anomaly;
 mod common;
 mod config;
 mod db;
@@ -9,6 +10,7 @@ mod web;
 
 use chrono::Utc;
 use chrono_tz::US::Pacific;
+use colored::Colorize;
 
 use config::AppConfig;
 use db::{Database, SnapshotChange};
@@ -114,13 +116,13 @@ async fn auto_populate_all_games(state: &AppState) {
         return;
     }
 
-    tracing::info!("Auto-populating historical data for {} game(s), {} day(s) back...", app_ids.len(), state.auto_populate_days);
+    println!("{}", format!("Syncing look-back period: {} day(s) for {} game(s)...", state.auto_populate_days, app_ids.len()).cyan());
 
     for app_id in app_ids {
         auto_populate_game(state, &steam, app_id).await;
     }
 
-    tracing::info!("Auto-populate complete.");
+    println!("{}", "Look-back sync complete.".cyan());
 }
 
 /// Auto-populate historical data for a single game, backfilling missing days.
@@ -171,7 +173,9 @@ pub async fn auto_populate_game(state: &AppState, steam: &SteamClient, app_id: u
     }
 
     if backfilled > 0 {
-        tracing::info!("Backfilled {backfilled} day(s) of data for app {app_id}");
+        println!("{}", format!("  app {app_id}: backfilled {backfilled} day(s)").cyan());
+    } else {
+        tracing::debug!("app {app_id}: already up to date");
     }
 }
 
@@ -239,20 +243,75 @@ async fn polling_loop(state: AppState, poll_interval_minutes: u64) {
                                 report.app_id,
                                 report.date,
                             );
-                            telegram::notify_change(
+
+                            // Run anomaly detection
+                            let anomaly_config = state.get_anomaly_config().await;
+                            let anomaly_result = anomaly::detect_anomalies(
                                 &state.db,
                                 report.app_id,
                                 &report,
                                 &previous,
+                                &anomaly_config,
                             )
                             .await;
-                            discord::notify_change(
-                                &state.db,
-                                report.app_id,
-                                &report,
-                                &previous,
-                            )
-                            .await;
+
+                            // Check notification mode
+                            let notification_mode = state.get_notification_mode().await;
+                            let is_real_anomaly = anomaly_result.is_anomalous && !anomaly_result.insufficient_data && !anomaly_result.error;
+                            let should_notify = if notification_mode == "anomalies_only" {
+                                if anomaly_result.error {
+                                    tracing::warn!(
+                                        "Anomaly detection failed for app {} — skipping notification (transient error)",
+                                        report.app_id,
+                                    );
+                                    false
+                                } else if is_real_anomaly {
+                                    tracing::info!(
+                                        "Anomaly detected for app {} — sending notification",
+                                        report.app_id,
+                                    );
+                                    true
+                                } else if anomaly_result.insufficient_data {
+                                    tracing::info!(
+                                        "Insufficient data for anomaly detection on app {} — sending notification as fallback",
+                                        report.app_id,
+                                    );
+                                    true
+                                } else {
+                                    tracing::info!(
+                                        "No anomaly for app {} — skipping notification (anomalies_only mode)",
+                                        report.app_id,
+                                    );
+                                    false
+                                }
+                            } else {
+                                true
+                            };
+
+                            if should_notify {
+                                // Only attach anomaly context when we have a real detection
+                                let anomaly_ref = if is_real_anomaly {
+                                    Some(&anomaly_result)
+                                } else {
+                                    None
+                                };
+                                telegram::notify_change(
+                                    &state.db,
+                                    report.app_id,
+                                    &report,
+                                    &previous,
+                                    anomaly_ref,
+                                )
+                                .await;
+                                discord::notify_change(
+                                    &state.db,
+                                    report.app_id,
+                                    &report,
+                                    &previous,
+                                    anomaly_ref,
+                                )
+                                .await;
+                            }
                         }
                         Ok(SnapshotChange::FirstSnapshot) => {
                             tracing::info!(

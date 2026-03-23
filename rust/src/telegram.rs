@@ -646,23 +646,52 @@ pub async fn notify_change(
     app_id: u32,
     current: &WishlistReport,
     previous: &WishlistReport,
+    anomaly: Option<&crate::anomaly::AnomalyResult>,
 ) {
     let ctx = match prepare_notification(db, "telegram", app_id).await {
         Some(ctx) => ctx,
         None => return,
     };
 
-    let msg = ChangeMessage::new(ctx.app_name, current, previous);
+    let msg = ChangeMessage::new(ctx.app_name, current, previous, anomaly);
 
-    let message = format!(
-        "📊 <b>{}</b> ({app_id}) > {}\n\
-         \n\
-         Adds: {}\n\
-         Deletes: {}\n\
-         Purchases: {}\n\
-         Gifts: {}",
-        msg.app_name, msg.header(), msg.adds, msg.deletes, msg.purchases, msg.gifts,
+    let emoji = if msg.anomaly_flags.is_some() { "🚨" } else { "📊" };
+
+    let fmt_metric = |label: &str, value: &str, flag: Option<&crate::common::MetricAnomalyFlag>| -> String {
+        match flag {
+            Some(f) if f.is_anomalous => format!("{label}: {value} ⚠️\n  <i>{}</i>", f.detail),
+            _ => format!("{label}: {value}"),
+        }
+    };
+
+    let (adds_line, deletes_line, purchases_line, gifts_line) = match &msg.anomaly_flags {
+        Some(f) => (
+            fmt_metric("Adds", &msg.adds, Some(&f.adds)),
+            fmt_metric("Deletes", &msg.deletes, Some(&f.deletes)),
+            fmt_metric("Purchases", &msg.purchases, Some(&f.purchases)),
+            fmt_metric("Gifts", &msg.gifts, Some(&f.gifts)),
+        ),
+        None => (
+            fmt_metric("Adds", &msg.adds, None),
+            fmt_metric("Deletes", &msg.deletes, None),
+            fmt_metric("Purchases", &msg.purchases, None),
+            fmt_metric("Gifts", &msg.gifts, None),
+        ),
+    };
+
+    let mut message = format!(
+        "{emoji} <b>{}</b> ({app_id}) > {}\n\n{adds_line}\n{deletes_line}\n{purchases_line}\n{gifts_line}",
+        msg.app_name, msg.header(),
     );
+
+    if let Some(flags) = &msg.anomaly_flags
+        && !flags.country_alerts.is_empty()
+    {
+        message.push_str("\n\n<b>Country anomalies:</b>");
+        for alert in &flags.country_alerts {
+            message.push_str(&format!("\n  {alert}"));
+        }
+    }
 
     let bot = Bot::new(ctx.token);
 

@@ -33,6 +33,12 @@ const CONFIG_DISCORD_BOT_TOKEN: &str = "discord_bot_token";
 const CONFIG_DISCORD_ADMIN_IDS: &str = "discord_admin_ids";
 const CONFIG_DISCORD_ENABLED: &str = "discord_enabled";
 const CONFIG_JWT_SECRET: &str = "jwt_secret";
+const CONFIG_NOTIFICATION_MODE: &str = "notification_mode";
+const CONFIG_ANOMALY_LOOKBACK_DAYS: &str = "anomaly_lookback_days";
+const CONFIG_ANOMALY_SENSITIVITY_UP: &str = "anomaly_sensitivity_up";
+const CONFIG_ANOMALY_SENSITIVITY_DOWN: &str = "anomaly_sensitivity_down";
+const CONFIG_ANOMALY_MIN_ABSOLUTE: &str = "anomaly_min_absolute";
+const CONFIG_ANOMALY_MAD_FLOOR_PCT: &str = "anomaly_mad_floor_pct";
 
 #[derive(Embed)]
 #[folder = "../web/dist"]
@@ -159,6 +165,75 @@ impl AppState {
             .flatten()
             .and_then(|v| v.parse().ok())
             .unwrap_or(DEFAULT_RETENTION_DAYS)
+    }
+
+    pub async fn get_notification_mode(&self) -> String {
+        self.db
+            .get_config(CONFIG_NOTIFICATION_MODE)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "every_update".to_string())
+    }
+
+    pub async fn get_anomaly_config(&self) -> crate::anomaly::AnomalyConfig {
+        let lookback_days = self
+            .db
+            .get_config(CONFIG_ANOMALY_LOOKBACK_DAYS)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(14);
+        // Support legacy single "anomaly_sensitivity" key: if up/down are not set,
+        // fall back to the legacy key, then to the default.
+        let legacy_sensitivity: Option<f64> = self
+            .db
+            .get_config("anomaly_sensitivity")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|v| v.parse().ok());
+        let default_sens = legacy_sensitivity.unwrap_or(2.0);
+        let sensitivity_up = self
+            .db
+            .get_config(CONFIG_ANOMALY_SENSITIVITY_UP)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(default_sens);
+        let sensitivity_down = self
+            .db
+            .get_config(CONFIG_ANOMALY_SENSITIVITY_DOWN)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(default_sens);
+        let min_absolute = self
+            .db
+            .get_config(CONFIG_ANOMALY_MIN_ABSOLUTE)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(5);
+        let mad_floor_pct = self
+            .db
+            .get_config(CONFIG_ANOMALY_MAD_FLOOR_PCT)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.05);
+        crate::anomaly::AnomalyConfig {
+            lookback_days,
+            sensitivity_up,
+            sensitivity_down,
+            min_absolute,
+            mad_floor_pct,
+        }
     }
 
     /// Return the latest known version from cache. If the cache is stale or empty,
@@ -526,6 +601,18 @@ struct SnapshotEntry {
     adds_linux: u64,
     countries: Vec<crate::steam::CountryReport>,
     fetched_at: String,
+    /// Whether this snapshot represents an anomalous change from the previous one (any metric).
+    is_anomaly: bool,
+    /// Per-metric anomaly flags so the UI can highlight only the affected metrics.
+    anomaly_metrics: AnomalyMetrics,
+}
+
+#[derive(Serialize, Default)]
+struct AnomalyMetrics {
+    adds: bool,
+    deletes: bool,
+    purchases: bool,
+    gifts: bool,
 }
 
 #[derive(Serialize)]
@@ -547,6 +634,12 @@ struct AdminConfigUpdate {
     discord_admin_ids: Option<String>,
     discord_enabled: Option<bool>,
     tracking_retention_days: Option<u32>,
+    notification_mode: Option<String>,
+    anomaly_lookback_days: Option<u32>,
+    anomaly_sensitivity_up: Option<f64>,
+    anomaly_sensitivity_down: Option<f64>,
+    anomaly_min_absolute: Option<u64>,
+    anomaly_mad_floor_pct: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -559,6 +652,12 @@ struct AdminConfigResponse {
     discord_admin_ids: Option<String>,
     discord_enabled: bool,
     tracking_retention_days: u32,
+    notification_mode: String,
+    anomaly_lookback_days: u32,
+    anomaly_sensitivity_up: f64,
+    anomaly_sensitivity_down: f64,
+    anomaly_min_absolute: u64,
+    anomaly_mad_floor_pct: f64,
 }
 
 #[derive(Deserialize)]
@@ -955,23 +1054,106 @@ async fn api_game_detail(
             }
         });
 
-    let history = snapshots
-        .into_iter()
-        .map(|s| SnapshotEntry {
-            date: if s.date.contains('T') {
-                s.date
+    // Compute anomaly flags for each snapshot in the history.
+    // Uses the same robust median+MAD approach as real-time detection (anomaly.rs),
+    // with timestamp-based lookback window and time-normalized rates (per day).
+    let anomaly_config = state.get_anomaly_config().await;
+    let lookback_secs = anomaly_config.lookback_days as f64 * 86400.0;
+
+    let history: Vec<SnapshotEntry> = snapshots
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let anomaly_metrics = if i == 0 {
+                AnomalyMetrics::default()
             } else {
-                format!("{}T00:00:00Z", s.date)
-            },
-            adds: s.adds,
-            deletes: s.deletes,
-            purchases: s.purchases,
-            gifts: s.gifts,
-            adds_windows: s.adds_windows,
-            adds_mac: s.adds_mac,
-            adds_linux: s.adds_linux,
-            countries: s.countries,
-            fetched_at: s.fetched_at.unwrap_or_default(),
+                let prev = &snapshots[i - 1];
+
+                // Find lookback window start using actual timestamps
+                let curr_ts = s.fetched_at.as_deref().unwrap_or("");
+                let lookback_start = (0..i).rfind(|&j| {
+                    let ts = snapshots[j].fetched_at.as_deref().unwrap_or("");
+                    crate::db::elapsed_days(ts, curr_ts) * 86400.0 > lookback_secs
+                }).map(|j| j + 1).unwrap_or(0);
+
+                let window = &snapshots[lookback_start..i];
+                // Need at least 4 snapshots to get 3 rate pairs (matching anomaly.rs min 3 data points)
+                if window.len() < 4 {
+                    AnomalyMetrics::default()
+                } else {
+                    // Compute days elapsed between current and previous snapshot
+                    let prev_ts = prev.fetched_at.as_deref().unwrap_or("");
+                    let days_elapsed = crate::db::elapsed_days(prev_ts, curr_ts);
+                    let days_elapsed = if days_elapsed <= 0.0 { 1.0 } else { days_elapsed };
+
+                    let check_metric = |curr_val: u64, prev_val: u64, get_vals: &dyn Fn(&crate::steam::WishlistReport) -> u64| -> bool {
+                        let raw_delta = curr_val as i64 - prev_val as i64;
+                        if raw_delta == 0 {
+                            return false;
+                        }
+                        if raw_delta.unsigned_abs() < anomaly_config.min_absolute {
+                            return false;
+                        }
+                        let current_rate = raw_delta as f64 / days_elapsed;
+
+                        // Compute historical rates from the lookback window
+                        let mut rates: Vec<f64> = window.windows(2)
+                            .filter_map(|w| {
+                                let t0 = w[0].fetched_at.as_deref().unwrap_or("");
+                                let t1 = w[1].fetched_at.as_deref().unwrap_or("");
+                                let d = crate::db::elapsed_days(t0, t1);
+                                if d <= 0.0 { return None; }
+                                let raw = get_vals(&w[1]) as i64 - get_vals(&w[0]) as i64;
+                                Some(raw as f64 / d)
+                            })
+                            .collect();
+                        if rates.len() < 3 {
+                            return false;
+                        }
+                        // Use median + MAD (consistent with anomaly.rs)
+                        let median = crate::anomaly::f64_median_pub(&mut rates);
+                        let mad = crate::anomaly::f64_mad_pub(&mut rates, median);
+                        let effective_mad = crate::anomaly::apply_mad_floor_pub(mad, median, anomaly_config.mad_floor_pct);
+                        if effective_mad == 0.0 {
+                            (current_rate - median).abs() > f64::EPSILON
+                        } else {
+                            let deviation = current_rate - median;
+                            let z = deviation.abs() / effective_mad;
+                            if deviation >= 0.0 {
+                                z > anomaly_config.sensitivity_up
+                            } else {
+                                z > anomaly_config.sensitivity_down
+                            }
+                        }
+                    };
+                    AnomalyMetrics {
+                        adds: check_metric(s.adds, prev.adds, &|r| r.adds),
+                        deletes: check_metric(s.deletes, prev.deletes, &|r| r.deletes),
+                        purchases: check_metric(s.purchases, prev.purchases, &|r| r.purchases),
+                        gifts: check_metric(s.gifts, prev.gifts, &|r| r.gifts),
+                    }
+                }
+            };
+            let is_anomaly = anomaly_metrics.adds || anomaly_metrics.deletes || anomaly_metrics.purchases || anomaly_metrics.gifts;
+
+            SnapshotEntry {
+                date: if s.date.contains('T') {
+                    s.date.clone()
+                } else {
+                    format!("{}T00:00:00Z", s.date)
+                },
+                adds: s.adds,
+                deletes: s.deletes,
+                purchases: s.purchases,
+                gifts: s.gifts,
+                adds_windows: s.adds_windows,
+                adds_mac: s.adds_mac,
+                adds_linux: s.adds_linux,
+                countries: s.countries.clone(),
+                fetched_at: s.fetched_at.clone().unwrap_or_default(),
+                is_anomaly,
+                anomaly_metrics,
+            }
         })
         .collect();
 
@@ -1020,6 +1202,35 @@ async fn api_admin_config_get(State(state): State<AppState>, jar: CookieJar) -> 
         .and_then(|v| v.parse().ok())
         .unwrap_or(DEFAULT_RETENTION_DAYS);
 
+    let notification_mode = config
+        .get(CONFIG_NOTIFICATION_MODE)
+        .cloned()
+        .unwrap_or_else(|| "every_update".to_string());
+    let anomaly_lookback_days = config
+        .get(CONFIG_ANOMALY_LOOKBACK_DAYS)
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(14);
+    let legacy_sensitivity: Option<f64> = config
+        .get("anomaly_sensitivity")
+        .and_then(|v| v.parse().ok());
+    let default_sens = legacy_sensitivity.unwrap_or(2.0);
+    let anomaly_sensitivity_up = config
+        .get(CONFIG_ANOMALY_SENSITIVITY_UP)
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default_sens);
+    let anomaly_sensitivity_down = config
+        .get(CONFIG_ANOMALY_SENSITIVITY_DOWN)
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default_sens);
+    let anomaly_min_absolute = config
+        .get(CONFIG_ANOMALY_MIN_ABSOLUTE)
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(5);
+    let anomaly_mad_floor_pct = config
+        .get(CONFIG_ANOMALY_MAD_FLOOR_PCT)
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0.05);
+
     Json(AdminConfigResponse {
         has_steam_api_key: has_steam_key,
         has_telegram_bot_token: has_tg_token,
@@ -1029,6 +1240,12 @@ async fn api_admin_config_get(State(state): State<AppState>, jar: CookieJar) -> 
         discord_admin_ids: dc_ids,
         discord_enabled: dc_enabled,
         tracking_retention_days: retention_days,
+        notification_mode,
+        anomaly_lookback_days,
+        anomaly_sensitivity_up,
+        anomaly_sensitivity_down,
+        anomaly_min_absolute,
+        anomaly_mad_floor_pct,
     })
     .into_response()
 }
@@ -1275,6 +1492,99 @@ async fn api_admin_config_update(
         if let Err(e) = state
             .db
             .set_config(CONFIG_TRACKING_RETENTION_DAYS, &days.to_string())
+            .await
+        {
+            return e.into_response();
+        }
+    }
+
+    if let Some(mode) = req.notification_mode {
+        let mode = mode.trim().to_string();
+        if mode != "every_update" && mode != "anomalies_only" {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "Invalid notification mode. Must be 'every_update' or 'anomalies_only'." })),
+            )
+                .into_response();
+        }
+        if let Err(e) = state.db.set_config(CONFIG_NOTIFICATION_MODE, &mode).await {
+            return e.into_response();
+        }
+    }
+
+    if let Some(days) = req.anomaly_lookback_days {
+        let days = days.max(1);
+        if let Err(e) = state
+            .db
+            .set_config(CONFIG_ANOMALY_LOOKBACK_DAYS, &days.to_string())
+            .await
+        {
+            return e.into_response();
+        }
+    }
+
+    if let Some(sensitivity_up) = req.anomaly_sensitivity_up {
+        if sensitivity_up <= 0.0 {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "Anomaly sensitivity (up) must be greater than 0." })),
+            )
+                .into_response();
+        }
+        if let Err(e) = state
+            .db
+            .set_config(CONFIG_ANOMALY_SENSITIVITY_UP, &sensitivity_up.to_string())
+            .await
+        {
+            return e.into_response();
+        }
+    }
+
+    if let Some(sensitivity_down) = req.anomaly_sensitivity_down {
+        if sensitivity_down <= 0.0 {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "Anomaly sensitivity (down) must be greater than 0." })),
+            )
+                .into_response();
+        }
+        if let Err(e) = state
+            .db
+            .set_config(CONFIG_ANOMALY_SENSITIVITY_DOWN, &sensitivity_down.to_string())
+            .await
+        {
+            return e.into_response();
+        }
+    }
+
+    if let Some(mad_floor_pct) = req.anomaly_mad_floor_pct {
+        if mad_floor_pct < 0.0 || mad_floor_pct > 1.0 {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "MAD floor percentage must be between 0 and 1." })),
+            )
+                .into_response();
+        }
+        if let Err(e) = state
+            .db
+            .set_config(CONFIG_ANOMALY_MAD_FLOOR_PCT, &mad_floor_pct.to_string())
+            .await
+        {
+            return e.into_response();
+        }
+    }
+
+    if let Some(min_abs) = req.anomaly_min_absolute {
+        if min_abs < 1 {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "Minimum absolute change must be at least 1." })),
+            )
+                .into_response();
+        }
+        if let Err(e) = state
+            .db
+            .set_config(CONFIG_ANOMALY_MIN_ABSOLUTE, &min_abs.to_string())
             .await
         {
             return e.into_response();
@@ -1633,8 +1943,8 @@ async fn debug_test_change(
     // Insert the fake snapshot
     match state.db.insert_snapshot_if_changed(&fake_report).await {
         Ok(SnapshotChange::Changed { previous }) => {
-            crate::telegram::notify_change(&state.db, app_id, &fake_report, &previous).await;
-            crate::discord::notify_change(&state.db, app_id, &fake_report, &previous).await;
+            crate::telegram::notify_change(&state.db, app_id, &fake_report, &previous, None).await;
+            crate::discord::notify_change(&state.db, app_id, &fake_report, &previous, None).await;
             Json(serde_json::json!({
                 "status": "changed",
                 "app_id": app_id,

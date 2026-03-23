@@ -9,8 +9,8 @@ export const METRIC_CONFIG: Record<
   string,
   { label: string; color: string; prefix: string }
 > = {
-  adds: { label: 'Wishlist Adds', color: 'var(--green)', prefix: '+' },
-  deletes: { label: 'Wishlist Deletes', color: 'var(--red)', prefix: '-' },
+  adds: { label: 'Wishlist Adds', color: 'var(--green)', prefix: '' },
+  deletes: { label: 'Wishlist Deletes', color: 'var(--red)', prefix: '' },
   purchases: { label: 'Purchases', color: 'var(--blue)', prefix: '' },
   gifts: { label: 'Gifts', color: 'var(--amber)', prefix: '' },
 };
