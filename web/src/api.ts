@@ -5,6 +5,12 @@ export class AuthError extends Error {
   }
 }
 
+/** Read the CSRF token from the wpb_csrf cookie. */
+function getCsrfToken(): string {
+  const match = document.cookie.match(/(?:^|;\s*)wpb_csrf=([^;]+)/);
+  return match ? match[1] : '';
+}
+
 /** GET request that throws on non-2xx responses. */
 export async function api<T>(path: string, opts?: RequestInit): Promise<T> {
   const res = await fetch(`/api${path}`, opts);
@@ -17,7 +23,10 @@ export async function api<T>(path: string, opts?: RequestInit): Promise<T> {
 export async function apiPost<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(`/api${path}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      'X-CSRF-Token': getCsrfToken(),
+    },
     body: JSON.stringify(body),
   });
   if (res.status === 401) throw new AuthError();

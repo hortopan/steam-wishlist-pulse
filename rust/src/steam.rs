@@ -1,13 +1,54 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use chrono::Utc;
 use chrono_tz::US::Pacific;
 use reqwest::Client;
 use serde::Deserialize;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 use crate::error::{AppError, AppResult};
+
+/// Token-bucket rate limiter for Steam API calls.
+///
+/// Allows up to `capacity` requests, refilling at `refill_rate` tokens/second.
+struct RateLimiter {
+    tokens: f64,
+    capacity: f64,
+    refill_rate: f64,
+    last_refill: Instant,
+}
+
+impl RateLimiter {
+    fn new(capacity: f64, refill_rate: f64) -> Self {
+        Self {
+            tokens: capacity,
+            capacity,
+            refill_rate,
+            last_refill: Instant::now(),
+        }
+    }
+
+    /// Wait until a token is available, then consume it.
+    async fn acquire(&mut self) {
+        loop {
+            let now = Instant::now();
+            let elapsed = now.duration_since(self.last_refill).as_secs_f64();
+            self.tokens = (self.tokens + elapsed * self.refill_rate).min(self.capacity);
+            self.last_refill = now;
+
+            if self.tokens >= 1.0 {
+                self.tokens -= 1.0;
+                return;
+            }
+
+            // Sleep until at least one token is available
+            let wait = (1.0 - self.tokens) / self.refill_rate;
+            tokio::time::sleep(std::time::Duration::from_secs_f64(wait)).await;
+        }
+    }
+}
 
 const WISHLIST_API_URL: &str =
     "https://partner.steam-api.com/IPartnerFinancialsService/GetAppWishlistReporting/v1/";
@@ -20,11 +61,13 @@ pub struct AppInfo {
     pub image_url: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SteamClient {
     http: Client,
     api_key: Arc<RwLock<String>>,
     app_info: Arc<RwLock<HashMap<u32, AppInfo>>>,
+    /// Shared rate limiter: 10 requests burst, refilling at 2/sec.
+    rate_limiter: Arc<Mutex<RateLimiter>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -122,6 +165,8 @@ impl SteamClient {
             http: Client::new(),
             api_key: Arc::new(RwLock::new(api_key)),
             app_info: Arc::new(RwLock::new(HashMap::new())),
+            // Allow bursts of 10 requests, refill at 2 per second
+            rate_limiter: Arc::new(Mutex::new(RateLimiter::new(10.0, 2.0))),
         }
     }
 
@@ -135,6 +180,8 @@ impl SteamClient {
         if let Some(info) = self.app_info.read().await.get(&app_id) {
             return Ok(info.name.clone());
         }
+
+        self.rate_limiter.lock().await.acquire().await;
 
         let resp = self
             .http
@@ -196,6 +243,8 @@ impl SteamClient {
         date: &str,
     ) -> AppResult<WishlistReport> {
         tracing::debug!("Requesting wishlist: {WISHLIST_API_URL}?appid={app_id}&date={date}");
+
+        self.rate_limiter.lock().await.acquire().await;
 
         let api_key = self.api_key.read().await.clone();
         let resp = self

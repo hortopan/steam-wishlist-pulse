@@ -8,6 +8,7 @@ use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use axum::Router;
 use axum::extract::State;
 use axum::http::{StatusCode, Uri, header};
+use axum::middleware;
 use axum::response::{Html, IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
@@ -23,6 +24,8 @@ use crate::db::Database;
 use crate::steam::SteamClient;
 
 const SESSION_COOKIE: &str = "wpb_session";
+const CSRF_COOKIE: &str = "wpb_csrf";
+const CSRF_HEADER: &str = "x-csrf-token";
 const CONFIG_ADMIN_PASSWORD_HASH: &str = "admin_password_hash";
 const CONFIG_READ_PASSWORD_HASH: &str = "read_password_hash";
 const CONFIG_STEAM_API_KEY: &str = "steam_api_key";
@@ -349,6 +352,22 @@ impl AppState {
         builder.build()
     }
 
+    /// Build a CSRF cookie with a fresh random token.
+    fn csrf_cookie(&self) -> Cookie<'static> {
+        let mut rng = rand::thread_rng();
+        let bytes: [u8; 16] = rng.r#gen();
+        let token = hex::encode(bytes);
+        let mut builder = Cookie::build((CSRF_COOKIE, token))
+            .path("/")
+            .http_only(false)   // JS must be able to read this
+            .same_site(SameSite::Lax)
+            .max_age(Duration::days(7));
+        if !self.insecure {
+            builder = builder.secure(true);
+        }
+        builder.build()
+    }
+
     /// Validate the session cookie and return claims if valid.
     async fn get_session(&self, jar: &CookieJar) -> Option<JwtClaims> {
         let token = jar.get(SESSION_COOKIE)?.value().to_string();
@@ -538,7 +557,8 @@ struct AuthStatus {
     authenticated: bool,
     access_level: Option<AccessLevel>,
     setup_required: bool,
-    version: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    version: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     latest_version: Option<String>,
 }
@@ -737,20 +757,31 @@ fn parse_app_id(input: &str) -> Result<u32, String> {
 
 // ── Route handlers ──────────────────────────────────────────────────
 
-async fn api_auth_status(State(state): State<AppState>, jar: CookieJar) -> Json<AuthStatus> {
+async fn api_auth_status(State(state): State<AppState>, jar: CookieJar) -> (CookieJar, Json<AuthStatus>) {
     let setup_required = !state.passwords_configured().await;
     let session = state.get_session(&jar).await;
+    let is_authenticated = session.is_some();
 
-    let current_version = env!("CARGO_PKG_VERSION");
-    let latest_version = state.get_latest_version().await.filter(|v| v != current_version);
+    // Only expose version info to authenticated users
+    let (version, latest_version) = if is_authenticated {
+        let current_version = env!("CARGO_PKG_VERSION");
+        let latest = state.get_latest_version().await.filter(|v| v != current_version);
+        (Some(current_version), latest)
+    } else {
+        (None, None)
+    };
 
-    Json(AuthStatus {
-        authenticated: session.is_some(),
+    // Always set/refresh a CSRF cookie so the frontend can read it
+    let csrf_cookie = state.csrf_cookie();
+    let jar = jar.add(csrf_cookie);
+
+    (jar, Json(AuthStatus {
+        authenticated: is_authenticated,
         access_level: session.map(|s| s.access_level),
         setup_required,
-        version: current_version,
+        version,
         latest_version,
-    })
+    }))
 }
 
 async fn api_login(
@@ -1982,6 +2013,65 @@ async fn debug_test_change(
     }
 }
 
+// ── CSRF middleware ──────────────────────────────────────────────────
+
+/// Validates CSRF token on state-changing requests (POST/PUT/DELETE/PATCH).
+///
+/// Uses the double-submit cookie pattern: the `wpb_csrf` cookie value must
+/// match the `X-CSRF-Token` request header. Both are opaque random tokens
+/// set by the server — a cross-origin attacker cannot read the cookie to
+/// forge the header.
+async fn csrf_middleware(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let dominated = matches!(
+        *req.method(),
+        axum::http::Method::POST | axum::http::Method::PUT | axum::http::Method::DELETE | axum::http::Method::PATCH
+    );
+
+    // Auth endpoints are exempt: login requires a password (natural CSRF barrier),
+    // logout is low-impact, and setup only works when unconfigured.
+    let path = req.uri().path();
+    let exempt = path.starts_with("/api/auth/") || path == "/api/setup";
+
+    if dominated && !exempt {
+        // Extract the CSRF cookie value
+        let cookie_token = req
+            .headers()
+            .get(axum::http::header::COOKIE)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|cookies| {
+                cookies.split(';').find_map(|c| {
+                    let c = c.trim();
+                    c.strip_prefix(&format!("{CSRF_COOKIE}="))
+                })
+            })
+            .map(|s| s.to_string());
+
+        let header_token = req
+            .headers()
+            .get(CSRF_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
+        match (cookie_token, header_token) {
+            (Some(c), Some(h)) if !c.is_empty() && c == h => {
+                // Valid CSRF token — proceed
+            }
+            _ => {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({ "error": "CSRF token missing or invalid" })),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    next.run(req).await
+}
+
 // ── Router and server ───────────────────────────────────────────────
 
 pub async fn run_web(bind_addr: String, state: AppState) {
@@ -2008,6 +2098,7 @@ pub async fn run_web(bind_addr: String, state: AppState) {
         .route("/api/admin/untrack", post(api_admin_untrack_game))
         // Debug routes — uncomment for local testing only
         // .route("/debug/test/{app_id}", get(debug_test_change))
+        .layer(middleware::from_fn(csrf_middleware))
         .with_state(state)
         .fallback(static_handler);
 

@@ -27,9 +27,11 @@ In March 2026, Valve opened the [`GetAppWishlistReporting`](https://partner.stea
 ## Features
 
 - **Real-time Telegram & Discord notifications** — adds, deletes, purchases, gifts, with deltas
+- **Anomaly detection** — highlights unusual activity using a modified z-score algorithm so you can cut through the noise and catch what matters
+- **Configurable alert modes** — receive every update or only anomalies, with four sensitivity presets (Relaxed → Very Sensitive) plus full custom tuning
 - **Track multiple games** from a single instance
 - **Historical data** with configurable retention for spotting trends
-- **Web dashboard** — manage games, view stats, configure everything visually
+- **Web dashboard** — manage games, view stats, configure alerts visually
 - **Telegram bot commands** — track/untrack games and manage subscriptions from chat
 - **Discord bot with slash commands** — same controls available via Discord
 - **Two access levels** — Admin (full control) and Read-only (dashboard view)
@@ -75,9 +77,41 @@ A built-in admin panel served from the same binary — no separate deploy:
 - Add/remove games by App ID or Steam store URL
 - Configure Steam API key and Telegram bot token
 - Manage channel subscriptions and data retention
+- Configure anomaly detection sensitivity and notification preferences
 - Secured with Argon2 password hashing, JWT sessions, rate-limited login, and HTTPS cookies
 
 ![Web Dashboard](media/screenshots/2.png)
+
+## Anomaly Detection & Notifications
+
+By default, every wishlist change triggers a notification. If that's too noisy, switch to **Anomalies only** mode — you'll only be notified when the change is statistically unusual compared to recent history.
+
+### Notification modes
+
+| Mode              | Behaviour                                                                 |
+| ----------------- | ------------------------------------------------------------------------- |
+| **Every update**  | Notify on every change (default). Anomalous metrics are still highlighted |
+| **Anomalies only**| Notify only when unusual activity is detected. Normal changes are recorded silently |
+
+When anomaly detection doesn't have enough history yet (fewer than 3 snapshots), it falls back to notifying on every change so you never miss early data.
+
+### Sensitivity presets
+
+All presets are one-click selectable from the dashboard's **Alerts** tab:
+
+| Preset             | Lookback | Sensitivity (up/down) | Min absolute | MAD floor | Best for                                |
+| ------------------ | -------- | --------------------- | ------------ | --------- | --------------------------------------- |
+| **Relaxed**        | 14 days  | 3.0 / 3.0             | 10           | 10%       | Noisy games with frequent churn         |
+| **Balanced**       | 14 days  | 2.0 / 2.0             | 5            | 5%        | Good default for most games             |
+| **Sensitive**      | 7 days   | 1.5 / 1.5             | 2            | 2%        | Low-traffic games or early warnings     |
+| **Very Sensitive** | 7 days   | 1.0 / 1.0             | 1            | 0%        | Critical monitoring — flags nearly any deviation |
+| **Custom**         | —        | —                     | —            | —         | Full manual control over all parameters |
+
+### How it works
+
+![Anomaly Detection Configuration](media/screenshots/anomalies_config.png)
+
+The detector uses a **modified z-score** (Median + MAD) over the lookback window. Each metric — adds, deletes, purchases, gifts — is evaluated independently, with separate sensitivity thresholds for upward spikes and downward drops. Country-level anomalies are detected too, so you can spot regional surges after a localized event.
 
 ---
 
