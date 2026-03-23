@@ -167,6 +167,7 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           PUBLISHING: ${{ needs.plan.outputs.publishing }}
         run: |
           # Sign binaries inside the dist output directories, then repackage the archives
@@ -174,7 +175,7 @@ jobs:
             bin="${dir}wishlist-pulse"
             if [ -f "$bin" ]; then
               echo "Signing: $bin"
-              codesign --force --options runtime -s "Developer ID Application" "$bin"
+              codesign --force --options runtime -s "$APPLE_SIGNING_IDENTITY" "$bin"
               codesign -dvv "$bin"
 
               if [ "$PUBLISHING" = "true" ]; then
