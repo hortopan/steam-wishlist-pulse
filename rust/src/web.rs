@@ -1193,9 +1193,8 @@ async fn api_game_detail(
     // Get total count efficiently
     let total_snapshots = state
         .db
-        .get_snapshots_paginated(app_id, 1, 0)
+        .get_snapshot_count(app_id)
         .await
-        .map(|p| p.total)
         .unwrap_or(0);
 
     Json(GameDetailResponse {
@@ -1264,6 +1263,11 @@ async fn api_game_chart(
             let since = now - chrono::Duration::days(5 * 365);
             (since, "monthly")
         }
+        "all" => {
+            // Far enough back to cover any realistic dataset
+            let since = now - chrono::Duration::days(20 * 365);
+            (since, "monthly")
+        }
         _ => {
             let since = now - chrono::Duration::days(7);
             (since, "daily")
@@ -1296,7 +1300,7 @@ async fn api_game_chart(
 
         let context_with_secs: Vec<(f64, &crate::db::ChartPoint)> = raw_snapshots
             .iter()
-            .map(|p| (crate::db::elapsed_days("1970-01-01T00:00:00Z", &p.label) * 86400.0, p))
+            .map(|p| (crate::db::label_to_epoch_secs(&p.label), p))
             .collect();
 
         let raw_anomalies: Vec<(&crate::db::ChartPoint, AnomalyMetrics)> = raw_snapshots
@@ -1351,7 +1355,7 @@ async fn api_game_chart(
 
         let context_with_secs: Vec<(f64, &crate::db::ChartPoint)> = context_points
             .iter()
-            .map(|p| (crate::db::elapsed_days("1970-01-01T00:00:00Z", &p.label) * 86400.0, p))
+            .map(|p| (crate::db::label_to_epoch_secs(&p.label), p))
             .collect();
 
         let mut map: std::collections::HashMap<String, AnomalyMetrics> =
@@ -1473,7 +1477,7 @@ async fn api_game_history(
     // Pre-parse all context timestamps once to avoid repeated chrono parsing
     let context_with_secs: Vec<(f64, &crate::db::ChartPoint)> = context_snapshots
         .iter()
-        .map(|p| (crate::db::elapsed_days("1970-01-01T00:00:00Z", &p.label) * 86400.0, p))
+        .map(|p| (crate::db::label_to_epoch_secs(&p.label), p))
         .collect();
 
     let entries: Vec<HistoryEntry> = paginated
@@ -1533,7 +1537,7 @@ fn compute_anomaly_for_snapshot(
     if curr_ts.is_empty() {
         return AnomalyMetrics::default();
     }
-    let curr_secs = crate::db::elapsed_days("1970-01-01T00:00:00Z", curr_ts) * 86400.0;
+    let curr_secs = crate::db::label_to_epoch_secs(curr_ts);
     compute_anomaly_inner(
         curr_secs,
         snapshot.adds,
@@ -1553,7 +1557,7 @@ fn compute_anomaly_for_chart_point(
     config: &crate::anomaly::AnomalyConfig,
     lookback_secs: f64,
 ) -> AnomalyMetrics {
-    let curr_secs = crate::db::elapsed_days("1970-01-01T00:00:00Z", &point.label) * 86400.0;
+    let curr_secs = crate::db::label_to_epoch_secs(&point.label);
     compute_anomaly_inner(
         curr_secs,
         point.adds,

@@ -522,8 +522,14 @@ impl Database {
     pub async fn get_app_min_date(&self, app_id: u32) -> AppResult<Option<String>> {
         let conn = self.pool.get().await;
         let mut stmt = conn.prepare("SELECT min_date FROM app_info WHERE app_id = ?1")?;
-        let result = stmt.query_row([app_id], |row| row.get::<_, Option<String>>(0)).ok().flatten();
-        Ok(result)
+        match stmt.query_row([app_id], |row| row.get::<_, Option<String>>(0)) {
+            Ok(val) => Ok(val),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => {
+                tracing::error!("Failed to get app_min_date for app {app_id}: {e}");
+                Err(e.into())
+            }
+        }
     }
 
     // ── App info (name & image cache) ────────────────────────────────
@@ -672,6 +678,17 @@ impl Database {
             reports.push(report);
         }
         Ok(reports)
+    }
+
+    /// Get the total number of snapshots for a game.
+    pub async fn get_snapshot_count(&self, app_id: u32) -> AppResult<usize> {
+        let conn = self.pool.get().await;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM wishlist_snapshots WHERE app_id = ?1",
+            [app_id],
+            |row| row.get(0),
+        )?;
+        Ok(count as usize)
     }
 
     /// Get all-time totals (sum of all snapshots) for a single game.
@@ -1111,54 +1128,65 @@ impl Database {
 
 }
 
+/// Parse a flexible timestamp/label string into a NaiveDateTime.
+/// Supports: full ISO 8601, date-only, weekly ("2025-W03"), and monthly ("2025-01").
+fn parse_flexible_timestamp(s: &str) -> Option<chrono::NaiveDateTime> {
+    use chrono::{NaiveDate, NaiveDateTime};
+    // Full datetime: "2025-01-15T12:30:00Z" or "2025-01-15 12:30:00"
+    NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%SZ")
+        .or_else(|_| NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S"))
+        .ok()
+        // Date only: "2025-01-15"
+        .or_else(|| {
+            NaiveDate::parse_from_str(s, "%Y-%m-%d")
+                .ok()
+                .and_then(|d| d.and_hms_opt(0, 0, 0))
+        })
+        // Weekly: "2025-W03" (SQLite %W = Monday-start week 00-53)
+        .or_else(|| {
+            if s.len() >= 7 && s.contains("-W") {
+                let parts: Vec<&str> = s.split("-W").collect();
+                if parts.len() == 2 {
+                    let year: i32 = parts[0].parse().ok()?;
+                    let week: u32 = parts[1].parse().ok()?;
+                    // Approximate: Jan 1 + week * 7 days
+                    let jan1 = NaiveDate::from_ymd_opt(year, 1, 1)?;
+                    let day = jan1 + chrono::Duration::days(week as i64 * 7);
+                    day.and_hms_opt(0, 0, 0)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+        // Monthly: "2025-01"
+        .or_else(|| {
+            if s.len() == 7 && s.as_bytes()[4] == b'-' {
+                let year: i32 = s[..4].parse().ok()?;
+                let month: u32 = s[5..7].parse().ok()?;
+                NaiveDate::from_ymd_opt(year, month, 1)
+                    .and_then(|d| d.and_hms_opt(0, 0, 0))
+            } else {
+                None
+            }
+        })
+}
+
 /// Compute elapsed days between two ISO 8601 timestamps.
 pub fn elapsed_days(from: &str, to: &str) -> f64 {
-    use chrono::{NaiveDate, NaiveDateTime};
-    let parse = |s: &str| {
-        // Full datetime: "2025-01-15T12:30:00Z" or "2025-01-15 12:30:00"
-        NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%SZ")
-            .or_else(|_| NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S"))
-            .ok()
-            // Date only: "2025-01-15"
-            .or_else(|| {
-                NaiveDate::parse_from_str(s, "%Y-%m-%d")
-                    .ok()
-                    .and_then(|d| d.and_hms_opt(0, 0, 0))
-            })
-            // Weekly: "2025-W03" (SQLite %W = Monday-start week 00-53)
-            .or_else(|| {
-                if s.len() >= 7 && s.contains("-W") {
-                    let parts: Vec<&str> = s.split("-W").collect();
-                    if parts.len() == 2 {
-                        let year: i32 = parts[0].parse().ok()?;
-                        let week: u32 = parts[1].parse().ok()?;
-                        // Approximate: Jan 1 + week * 7 days
-                        let jan1 = NaiveDate::from_ymd_opt(year, 1, 1)?;
-                        let day = jan1 + chrono::Duration::days(week as i64 * 7);
-                        day.and_hms_opt(0, 0, 0)
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            })
-            // Monthly: "2025-01"
-            .or_else(|| {
-                if s.len() == 7 && s.as_bytes()[4] == b'-' {
-                    let year: i32 = s[..4].parse().ok()?;
-                    let month: u32 = s[5..7].parse().ok()?;
-                    NaiveDate::from_ymd_opt(year, month, 1)
-                        .and_then(|d| d.and_hms_opt(0, 0, 0))
-                } else {
-                    None
-                }
-            })
-    };
-    match (parse(from), parse(to)) {
+    match (parse_flexible_timestamp(from), parse_flexible_timestamp(to)) {
         (Some(a), Some(b)) => (b - a).num_seconds() as f64 / 86400.0,
         _ => 0.0,
     }
+}
+
+/// Convert a flexible timestamp/label string to epoch seconds.
+/// Returns 0.0 if the string cannot be parsed.
+pub fn label_to_epoch_secs(s: &str) -> f64 {
+    parse_flexible_timestamp(s)
+        .map(|dt| dt.and_utc().timestamp() as f64)
+        .unwrap_or(0.0)
 }
 
 /// Snapshot-to-snapshot delta rate (per day) for anomaly detection.

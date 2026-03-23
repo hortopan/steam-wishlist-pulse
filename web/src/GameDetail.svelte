@@ -45,7 +45,7 @@
   let destroyed = false;
 
   // Chart range
-  type ChartRange = "1d" | "2d" | "3d" | "7d" | "1m" | "3m" | "1y" | "5y";
+  type ChartRange = "1d" | "2d" | "3d" | "7d" | "1m" | "3m" | "1y" | "5y" | "all";
   const CHART_RANGES: { key: ChartRange; label: string }[] = [
     { key: "1d", label: "1D" },
     { key: "2d", label: "2D" },
@@ -55,6 +55,7 @@
     { key: "3m", label: "3M" },
     { key: "1y", label: "1Y" },
     { key: "5y", label: "5Y" },
+    { key: "all", label: "All" },
   ];
   let chartRange = $state<ChartRange>("7d");
 
