@@ -77,12 +77,7 @@ A built-in admin panel served from the same binary — no separate deploy:
 - Manage channel subscriptions and data retention
 - Secured with Argon2 password hashing, JWT sessions, rate-limited login, and HTTPS cookies
 
-<table>
-  <tr>
-    <td><img src="media/screenshots/2.png" width="400"></td>
-    <td><img src="media/screenshots/3.png" width="400"></td>
-  </tr>
-</table>
+![Web Dashboard](media/screenshots/2.png)
 
 ---
 
