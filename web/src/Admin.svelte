@@ -9,6 +9,7 @@
   let { onLogout }: { onLogout: () => void } = $props();
 
   let hasSteamApiKey = $state(false);
+  let encryptionEnabled = $state(false);
   let hasTelegramBotToken = $state(false);
   let hasDiscordBotToken = $state(false);
   let steamApiKey = $state("");
@@ -113,6 +114,7 @@
     try {
       const data = await api<any>("/admin/config");
       hasSteamApiKey = data.has_steam_api_key || false;
+      encryptionEnabled = data.encryption_enabled || false;
       hasTelegramBotToken = data.has_telegram_bot_token || false;
       hasDiscordBotToken = data.has_discord_bot_token || false;
       steamApiKey = "";
@@ -259,6 +261,12 @@
                 : "Enter Steam API key"}
               disabled={saving}
             />
+            {#if !encryptionEnabled}
+              <div class="encryption-warning">
+                <strong>No encryption configured.</strong> Credentials will be stored unencrypted in the database.
+                Set the <code>ENCRYPTION_SECRET</code> environment variable to enable encryption at rest.
+              </div>
+            {/if}
             <div class="api-key-help">
               <p>A <strong>Financial API Group</strong> web API key is required. To set one up:</p>
               <ol>
@@ -484,6 +492,12 @@
                   : "Token from @BotFather"}
                 disabled={saving}
               />
+              {#if !encryptionEnabled}
+                <div class="encryption-warning">
+                  <strong>No encryption configured.</strong> The bot token will be stored unencrypted.
+                  Set <code>ENCRYPTION_SECRET</code> to enable encryption at rest.
+                </div>
+              {/if}
             </div>
 
             <div class="form-group">
@@ -545,6 +559,12 @@
                   : "Token from Discord Developer Portal"}
                 disabled={saving}
               />
+              {#if !encryptionEnabled}
+                <div class="encryption-warning">
+                  <strong>No encryption configured.</strong> The bot token will be stored unencrypted.
+                  Set <code>ENCRYPTION_SECRET</code> to enable encryption at rest.
+                </div>
+              {/if}
               <div class="api-key-help">
                 <p>A Discord bot token is required. To set one up:</p>
                 <ol>
@@ -761,6 +781,24 @@
   .secret-status.not-configured {
     background: rgba(239, 68, 68, 0.1);
     color: var(--red);
+  }
+
+  .encryption-warning {
+    background: rgba(245, 158, 11, 0.1);
+    border: 1px solid rgba(245, 158, 11, 0.3);
+    color: #b45309;
+    border-radius: 0.5rem;
+    padding: 0.75rem 1rem;
+    font-size: 0.85rem;
+    margin-bottom: 0.75rem;
+    line-height: 1.4;
+  }
+
+  .encryption-warning code {
+    background: rgba(245, 158, 11, 0.15);
+    padding: 0.1rem 0.35rem;
+    border-radius: 0.25rem;
+    font-size: 0.8rem;
   }
 
   .config-section h2 {

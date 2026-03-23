@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use colored::Colorize;
+use secrecy::SecretString;
 
 const ENV_BIND_WEB_INTERFACE: &str = "BIND_WEB_INTERFACE";
 const ENV_DATABASE_PATH: &str = "DATABASE_PATH";
@@ -10,6 +11,7 @@ const ENV_ADMIN_PASSWORD: &str = "ADMIN_PASSWORD";
 const ENV_READ_PASSWORD: &str = "READ_PASSWORD";
 const ENV_POLL_INTERVAL: &str = "POLL_INTERVAL_MINUTES";
 const ENV_AUTO_POPULATE_DAYS: &str = "AUTO_POPULATE_DAYS";
+const ENV_ENCRYPTION_SECRET: &str = "ENCRYPTION_SECRET";
 
 const DEFAULT_BIND_ADDRESS: &str = "0.0.0.0:3000";
 
@@ -40,7 +42,6 @@ struct CliArgs {
     auto_populate_days: Option<u32>,
 }
 
-#[derive(Debug, Clone)]
 pub struct AppConfig {
     pub bind_web_interface: String,
     pub database_path: PathBuf,
@@ -49,6 +50,7 @@ pub struct AppConfig {
     pub insecure: bool,
     pub poll_interval_minutes: u64,
     pub auto_populate_days: u32,
+    pub encryption_secret: Option<SecretString>,
 }
 
 const DEFAULT_POLL_INTERVAL_MINUTES: u64 = 5;
@@ -98,13 +100,14 @@ fn print_usage_hint() {
     eprintln!();
     eprintln!("{}", "ENVIRONMENT VARIABLES:".cyan().bold());
     eprintln!(
-        "  {} {} {} {} {} {}",
+        "  {} {} {} {} {} {} {}",
         ENV_ADMIN_PASSWORD.yellow(),
         ENV_READ_PASSWORD.yellow(),
         ENV_BIND_WEB_INTERFACE.yellow(),
         ENV_DATABASE_PATH.yellow(),
         ENV_POLL_INTERVAL.yellow(),
         ENV_AUTO_POPULATE_DAYS.yellow(),
+        ENV_ENCRYPTION_SECRET.yellow(),
     );
     eprintln!();
     eprintln!(
@@ -185,5 +188,9 @@ fn build_config(args: CliArgs) -> Result<AppConfig, String> {
         insecure: args.insecure,
         poll_interval_minutes,
         auto_populate_days,
+        encryption_secret: env::var(ENV_ENCRYPTION_SECRET)
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(SecretString::from),
     })
 }

@@ -15,6 +15,7 @@ use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use rand::Rng;
 use rust_embed::Embed;
+use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use time::Duration;
 use tokio::sync::RwLock;
@@ -140,10 +141,11 @@ pub struct AppState {
     insecure: bool,
     pub auto_populate_days: u32,
     latest_version: Arc<tokio::sync::Mutex<Option<(String, Instant)>>>,
+    encryption_secret: Option<SecretString>,
 }
 
 impl AppState {
-    pub fn new(db: Database, steam: Option<SteamClient>, insecure: bool, auto_populate_days: u32) -> Self {
+    pub fn new(db: Database, steam: Option<SteamClient>, insecure: bool, auto_populate_days: u32, encryption_secret: Option<SecretString>) -> Self {
         if insecure {
             tracing::warn!("Running with --insecure: cookies will not require HTTPS");
         }
@@ -157,7 +159,28 @@ impl AppState {
             insecure,
             auto_populate_days,
             latest_version: Arc::new(tokio::sync::Mutex::new(None)),
+            encryption_secret,
         }
+    }
+
+    /// Encrypt a value if an encryption secret is configured, otherwise return plaintext.
+    fn encrypt_value(&self, plaintext: &str) -> Result<String, String> {
+        match &self.encryption_secret {
+            Some(secret) => crate::crypto::encrypt(secret, plaintext),
+            None => Ok(plaintext.to_string()),
+        }
+    }
+
+    /// Decrypt a value if an encryption secret is configured, otherwise return as-is.
+    fn decrypt_value(&self, stored: &str) -> Result<String, String> {
+        match &self.encryption_secret {
+            Some(secret) => crate::crypto::decrypt(secret, stored),
+            None => Ok(stored.to_string()),
+        }
+    }
+
+    pub fn encryption_enabled(&self) -> bool {
+        self.encryption_secret.is_some()
     }
 
     pub async fn get_retention_days(&self) -> u32 {
@@ -413,7 +436,7 @@ impl AppState {
             tracing::info!("Stopped previous Telegram bot instance");
         }
 
-        let token = self
+        let token_raw = self
             .db
             .get_config(CONFIG_TELEGRAM_BOT_TOKEN)
             .await
@@ -437,8 +460,14 @@ impl AppState {
             return;
         }
 
-        let token = match token {
-            Some(t) if !t.is_empty() => t,
+        let token = match token_raw {
+            Some(t) if !t.is_empty() => match self.decrypt_value(&t) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::error!("Failed to decrypt Telegram bot token: {e}");
+                    return;
+                }
+            },
             _ => {
                 tracing::info!("Telegram bot token not configured");
                 return;
@@ -486,7 +515,7 @@ impl AppState {
             tracing::info!("Stopped previous Discord bot instance");
         }
 
-        let token = self
+        let token_raw = self
             .db
             .get_config(CONFIG_DISCORD_BOT_TOKEN)
             .await
@@ -510,8 +539,14 @@ impl AppState {
             return;
         }
 
-        let token = match token {
-            Some(t) if !t.is_empty() => t,
+        let token = match token_raw {
+            Some(t) if !t.is_empty() => match self.decrypt_value(&t) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::error!("Failed to decrypt Discord bot token: {e}");
+                    return;
+                }
+            },
             _ => {
                 tracing::info!("Discord bot token not configured");
                 return;
@@ -665,6 +700,7 @@ struct AdminConfigUpdate {
 #[derive(Serialize)]
 struct AdminConfigResponse {
     has_steam_api_key: bool,
+    encryption_enabled: bool,
     has_telegram_bot_token: bool,
     has_discord_bot_token: bool,
     telegram_admin_ids: Option<String>,
@@ -1208,11 +1244,11 @@ async fn api_admin_config_get(State(state): State<AppState>, jar: CookieJar) -> 
 
     let has_steam_key = config
         .get(CONFIG_STEAM_API_KEY)
-        .map(|v| !v.is_empty())
+        .map(|v| !v.is_empty() && state.decrypt_value(v).is_ok())
         .unwrap_or(false);
     let has_tg_token = config
         .get(CONFIG_TELEGRAM_BOT_TOKEN)
-        .map(|v| !v.is_empty())
+        .map(|v| !v.is_empty() && state.decrypt_value(v).is_ok())
         .unwrap_or(false);
     let tg_ids = config.get(CONFIG_TELEGRAM_ADMIN_IDS).cloned();
     let tg_enabled = config
@@ -1221,7 +1257,7 @@ async fn api_admin_config_get(State(state): State<AppState>, jar: CookieJar) -> 
         .unwrap_or(false);
     let has_dc_token = config
         .get(CONFIG_DISCORD_BOT_TOKEN)
-        .map(|v| !v.is_empty())
+        .map(|v| !v.is_empty() && state.decrypt_value(v).is_ok())
         .unwrap_or(false);
     let dc_ids = config.get(CONFIG_DISCORD_ADMIN_IDS).cloned();
     let dc_enabled = config
@@ -1264,6 +1300,7 @@ async fn api_admin_config_get(State(state): State<AppState>, jar: CookieJar) -> 
 
     Json(AdminConfigResponse {
         has_steam_api_key: has_steam_key,
+        encryption_enabled: state.encryption_enabled(),
         has_telegram_bot_token: has_tg_token,
         has_discord_bot_token: has_dc_token,
         telegram_admin_ids: tg_ids,
@@ -1410,7 +1447,17 @@ async fn api_admin_config_update(
                 )
                     .into_response();
             }
-            if let Err(e) = state.db.set_config(CONFIG_STEAM_API_KEY, &key).await {
+            let store_value = match state.encrypt_value(&key) {
+                Ok(v) => v,
+                Err(e) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({ "error": format!("Encryption failed: {e}") })),
+                    )
+                        .into_response();
+                }
+            };
+            if let Err(e) = state.db.set_config(CONFIG_STEAM_API_KEY, &store_value).await {
                 return e.into_response();
             }
             state.ensure_steam(&key).await;
@@ -1431,7 +1478,17 @@ async fn api_admin_config_update(
                 )
                     .into_response();
             }
-            if let Err(e) = state.db.set_config(CONFIG_TELEGRAM_BOT_TOKEN, &token).await {
+            let store_value = match state.encrypt_value(&token) {
+                Ok(v) => v,
+                Err(e) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({ "error": format!("Encryption failed: {e}") })),
+                    )
+                        .into_response();
+                }
+            };
+            if let Err(e) = state.db.set_config(CONFIG_TELEGRAM_BOT_TOKEN, &store_value).await {
                 return e.into_response();
             }
         }
@@ -1481,7 +1538,17 @@ async fn api_admin_config_update(
                 )
                     .into_response();
             }
-            if let Err(e) = state.db.set_config(CONFIG_DISCORD_BOT_TOKEN, &token).await {
+            let store_value = match state.encrypt_value(&token) {
+                Ok(v) => v,
+                Err(e) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({ "error": format!("Encryption failed: {e}") })),
+                    )
+                        .into_response();
+                }
+            };
+            if let Err(e) = state.db.set_config(CONFIG_DISCORD_BOT_TOKEN, &store_value).await {
                 return e.into_response();
             }
         }

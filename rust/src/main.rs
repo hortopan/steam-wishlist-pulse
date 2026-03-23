@@ -1,6 +1,7 @@
 mod anomaly;
 mod common;
 mod config;
+mod crypto;
 mod db;
 mod discord;
 mod error;
@@ -49,15 +50,74 @@ async fn main() {
     )
     .await;
 
+    // ── Encryption secret rotation check ──────────────────────────────
+    const CONFIG_ENCRYPTION_SECRET_HASH: &str = "encryption_secret_hash";
+    const ENCRYPTED_CONFIG_KEYS: &[&str] = &["steam_api_key", "telegram_bot_token", "discord_bot_token"];
+
+    if let Some(ref secret) = config.encryption_secret {
+        let new_hash = crypto::hash_secret(secret);
+        let stored_hash = db.get_config(CONFIG_ENCRYPTION_SECRET_HASH).await.ok().flatten();
+        if let Some(ref old_hash) = stored_hash {
+            if *old_hash != new_hash {
+                tracing::warn!("Encryption secret has changed — removing all encrypted credentials (they were encrypted with the old secret). Please re-enter them via the admin panel.");
+                for key in ENCRYPTED_CONFIG_KEYS {
+                    let _ = db.delete_config(key).await;
+                }
+                let _ = db.set_config(CONFIG_ENCRYPTION_SECRET_HASH, &new_hash).await;
+            }
+        } else {
+            // First time setting an encryption secret — remove any existing plaintext credentials
+            // since we can't know if they're encrypted or not
+            let mut removed = false;
+            for key in ENCRYPTED_CONFIG_KEYS {
+                if db.get_config(key).await.ok().flatten().is_some() {
+                    let _ = db.delete_config(key).await;
+                    removed = true;
+                }
+            }
+            if removed {
+                tracing::warn!("Encryption secret set for the first time — removed existing plaintext credentials. Please re-enter them via the admin panel.");
+            }
+            let _ = db.set_config(CONFIG_ENCRYPTION_SECRET_HASH, &new_hash).await;
+        }
+    } else {
+        tracing::warn!("No ENCRYPTION_SECRET set — API keys and bot tokens will be stored unencrypted in the database. Set ENCRYPTION_SECRET environment variable for encryption at rest.");
+        // If encryption was previously enabled but now removed, stored credentials are unusable
+        let stored_hash = db.get_config(CONFIG_ENCRYPTION_SECRET_HASH).await.ok().flatten();
+        if stored_hash.is_some() {
+            tracing::warn!("Encryption was previously enabled — removing encrypted credentials (cannot decrypt without secret). Please re-enter them via the admin panel.");
+            for key in ENCRYPTED_CONFIG_KEYS {
+                let _ = db.delete_config(key).await;
+            }
+            let _ = db.delete_config(CONFIG_ENCRYPTION_SECRET_HASH).await;
+        }
+    }
+
     // Load Steam API key from database (configured via admin panel)
-    let steam_api_key = db.get_config("steam_api_key").await.ok().flatten();
+    let steam_api_key = match db.get_config("steam_api_key").await.ok().flatten() {
+        Some(stored) => {
+            if let Some(ref secret) = config.encryption_secret {
+                match crypto::decrypt(secret, &stored) {
+                    Ok(key) => Some(key),
+                    Err(e) => {
+                        tracing::error!("Failed to decrypt Steam API key: {e} — removing corrupted entry");
+                        let _ = db.delete_config("steam_api_key").await;
+                        None
+                    }
+                }
+            } else {
+                Some(stored)
+            }
+        }
+        None => None,
+    };
     let steam = steam_api_key.map(|key| {
         tracing::info!("Steam API key configured");
         SteamClient::new(key)
     });
 
     // Build shared application state
-    let app_state = AppState::new(db, steam, config.insecure, config.auto_populate_days);
+    let app_state = AppState::new(db, steam, config.insecure, config.auto_populate_days, config.encryption_secret.clone());
 
     // Kick off version check so the cache is warm before the first request
     {
