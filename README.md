@@ -100,6 +100,14 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/hortopan/steam-wishlist
 brew install hortopan/tap/wishlist-pulse
 ```
 
+#### Docker
+
+```bash
+docker run -p 3000:3000 -v wishlist-pulse-data:/data ghcr.io/hortopan/steam-wishlist-pulse:latest
+```
+
+Multi-arch image (amd64/arm64) available on [GitHub Container Registry](https://ghcr.io/hortopan/steam-wishlist-pulse).
+
 #### Manual download
 
 Prebuilt binaries for all platforms are available on the [Releases](https://github.com/hortopan/steam-wishlist-pulse/releases/latest) page:
