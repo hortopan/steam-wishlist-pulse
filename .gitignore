@@ -3,3 +3,4 @@ web/dist
 logo.psd
 .DS_Store
 target/
+build.sh

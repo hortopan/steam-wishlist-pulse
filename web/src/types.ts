@@ -1,3 +1,11 @@
+export interface CountryEntry {
+  country_code: string;
+  adds: number;
+  deletes: number;
+  purchases: number;
+  gifts: number;
+}
+
 export interface GameReport {
   app_id: number;
   name: string;
@@ -7,6 +15,10 @@ export interface GameReport {
   deletes: number;
   purchases: number;
   gifts: number;
+  adds_windows: number;
+  adds_mac: number;
+  adds_linux: number;
+  countries: CountryEntry[];
   changed_at: string | null;
 }
 
@@ -16,6 +28,10 @@ export interface SnapshotEntry {
   deletes: number;
   purchases: number;
   gifts: number;
+  adds_windows: number;
+  adds_mac: number;
+  adds_linux: number;
+  countries: CountryEntry[];
   fetched_at: string;
 }
 

@@ -36,11 +36,33 @@ struct WishlistApiResponse {
 struct WishlistResponseBody {
     date: Option<String>,
     wishlist_summary: Option<WishlistSummary>,
+    country_summary: Option<Vec<CountrySummaryEntry>>,
     app_min_date: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct WishlistSummary {
+    wishlist_adds: Option<u64>,
+    wishlist_deletes: Option<u64>,
+    wishlist_purchases: Option<u64>,
+    wishlist_gifts: Option<u64>,
+    wishlist_adds_windows: Option<u64>,
+    wishlist_adds_mac: Option<u64>,
+    wishlist_adds_linux: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CountrySummaryEntry {
+    country_code: Option<String>,
+    #[allow(dead_code)]
+    country_name: Option<String>,
+    #[allow(dead_code)]
+    region: Option<String>,
+    summary_actions: Option<CountrySummaryActions>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CountrySummaryActions {
     wishlist_adds: Option<u64>,
     wishlist_deletes: Option<u64>,
     wishlist_purchases: Option<u64>,
@@ -55,8 +77,23 @@ pub struct WishlistReport {
     pub deletes: u64,
     pub purchases: u64,
     pub gifts: u64,
+    /// Platform breakdown for adds.
+    pub adds_windows: u64,
+    pub adds_mac: u64,
+    pub adds_linux: u64,
+    /// Per-country breakdown.
+    pub countries: Vec<CountryReport>,
     /// ISO 8601 timestamp of when this snapshot was saved to the DB.
     pub fetched_at: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CountryReport {
+    pub country_code: String,
+    pub adds: u64,
+    pub deletes: u64,
+    pub purchases: u64,
+    pub gifts: u64,
 }
 
 /// Validate a Steam Web API key by making a lightweight partner API call
@@ -153,7 +190,7 @@ impl SteamClient {
         self.fetch_wishlist_for_date(app_id, &date).await
     }
 
-    async fn fetch_wishlist_for_date(
+    pub async fn fetch_wishlist_for_date(
         &self,
         app_id: u32,
         date: &str,
@@ -204,6 +241,22 @@ impl SteamClient {
             }
         };
 
+        let countries = resp_body
+            .country_summary
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|c| {
+                let actions = c.summary_actions?;
+                Some(CountryReport {
+                    country_code: c.country_code.unwrap_or_default(),
+                    adds: actions.wishlist_adds.unwrap_or(0),
+                    deletes: actions.wishlist_deletes.unwrap_or(0),
+                    purchases: actions.wishlist_purchases.unwrap_or(0),
+                    gifts: actions.wishlist_gifts.unwrap_or(0),
+                })
+            })
+            .collect();
+
         Ok(WishlistReport {
             app_id,
             date: resp_body.date.unwrap_or_else(|| date.to_string()),
@@ -211,6 +264,10 @@ impl SteamClient {
             deletes: summary.wishlist_deletes.unwrap_or(0),
             purchases: summary.wishlist_purchases.unwrap_or(0),
             gifts: summary.wishlist_gifts.unwrap_or(0),
+            adds_windows: summary.wishlist_adds_windows.unwrap_or(0),
+            adds_mac: summary.wishlist_adds_mac.unwrap_or(0),
+            adds_linux: summary.wishlist_adds_linux.unwrap_or(0),
+            countries,
             fetched_at: None,
         })
     }

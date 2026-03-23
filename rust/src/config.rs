@@ -9,6 +9,7 @@ const ENV_DATABASE_PATH: &str = "DATABASE_PATH";
 const ENV_ADMIN_PASSWORD: &str = "ADMIN_PASSWORD";
 const ENV_READ_PASSWORD: &str = "READ_PASSWORD";
 const ENV_POLL_INTERVAL: &str = "POLL_INTERVAL_MINUTES";
+const ENV_AUTO_POPULATE_DAYS: &str = "AUTO_POPULATE_DAYS";
 
 const DEFAULT_BIND_ADDRESS: &str = "0.0.0.0:3000";
 
@@ -34,6 +35,9 @@ struct CliArgs {
 
     #[arg(long, help = "Steam polling interval in minutes (default: 5)")]
     poll_interval_minutes: Option<u64>,
+
+    #[arg(long, help = "Number of days to auto-populate historical data for (default: 10)")]
+    auto_populate_days: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -44,9 +48,11 @@ pub struct AppConfig {
     pub read_password: Option<String>,
     pub insecure: bool,
     pub poll_interval_minutes: u64,
+    pub auto_populate_days: u32,
 }
 
 const DEFAULT_POLL_INTERVAL_MINUTES: u64 = 5;
+const DEFAULT_AUTO_POPULATE_DAYS: u32 = 10;
 
 fn resolve_string(cli: Option<String>, env_name: &str) -> Result<Option<String>, String> {
     let env_val = env::var(env_name).ok();
@@ -84,15 +90,21 @@ fn print_usage_hint() {
         "--poll-interval-minutes".green(),
         DEFAULT_POLL_INTERVAL_MINUTES,
     );
+    eprintln!(
+        "  {} <days>  Days of historical data to auto-populate (default: {})",
+        "--auto-populate-days".green(),
+        DEFAULT_AUTO_POPULATE_DAYS,
+    );
     eprintln!();
     eprintln!("{}", "ENVIRONMENT VARIABLES:".cyan().bold());
     eprintln!(
-        "  {} {} {} {} {}",
+        "  {} {} {} {} {} {}",
         ENV_ADMIN_PASSWORD.yellow(),
         ENV_READ_PASSWORD.yellow(),
         ENV_BIND_WEB_INTERFACE.yellow(),
         ENV_DATABASE_PATH.yellow(),
         ENV_POLL_INTERVAL.yellow(),
+        ENV_AUTO_POPULATE_DAYS.yellow(),
     );
     eprintln!();
     eprintln!(
@@ -154,6 +166,17 @@ fn build_config(args: CliArgs) -> Result<AppConfig, String> {
         return Err("Poll interval must be at least 1 minute".to_string());
     }
 
+    let auto_populate_str = resolve_string(
+        args.auto_populate_days.map(|v| v.to_string()),
+        ENV_AUTO_POPULATE_DAYS,
+    )?;
+    let auto_populate_days = match auto_populate_str {
+        Some(s) => s
+            .parse::<u32>()
+            .map_err(|_| format!("Invalid auto-populate-days: '{s}' (must be a positive integer)"))?,
+        None => DEFAULT_AUTO_POPULATE_DAYS,
+    };
+
     Ok(AppConfig {
         bind_web_interface: bind_addr,
         database_path,
@@ -161,5 +184,6 @@ fn build_config(args: CliArgs) -> Result<AppConfig, String> {
         read_password,
         insecure: args.insecure,
         poll_interval_minutes,
+        auto_populate_days,
     })
 }

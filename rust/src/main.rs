@@ -7,6 +7,9 @@ mod steam;
 mod telegram;
 mod web;
 
+use chrono::Utc;
+use chrono_tz::US::Pacific;
+
 use config::AppConfig;
 use db::{Database, SnapshotChange};
 use steam::SteamClient;
@@ -28,6 +31,7 @@ async fn main() {
     tracing::info!("Database: {}", config.database_path.display());
     tracing::info!("Web interface: {}", config.bind_web_interface);
     tracing::info!("Poll interval: {} minutes", config.poll_interval_minutes);
+    tracing::info!("Auto-populate days: {}", config.auto_populate_days);
 
     let db = Database::open(&config.database_path)
         .unwrap_or_else(|e| {
@@ -51,7 +55,15 @@ async fn main() {
     });
 
     // Build shared application state
-    let app_state = AppState::new(db, steam, config.insecure);
+    let app_state = AppState::new(db, steam, config.insecure, config.auto_populate_days);
+
+    // Auto-populate historical data on startup
+    if config.auto_populate_days > 0 {
+        let state = app_state.clone();
+        tokio::spawn(async move {
+            auto_populate_all_games(&state).await;
+        });
+    }
 
     // Spawn the background polling loop (reads steam client from shared state each tick)
     {
@@ -70,6 +82,89 @@ async fn main() {
 
     // Web interface always runs (blocking)
     web::run_web(config.bind_web_interface, app_state).await;
+}
+
+/// Auto-populate historical data for all tracked games.
+async fn auto_populate_all_games(state: &AppState) {
+    let steam = match state.get_steam().await {
+        Some(s) => s,
+        None => {
+            tracing::debug!("No Steam API key configured, skipping auto-populate.");
+            return;
+        }
+    };
+
+    let app_ids = match state.db.get_tracked_game_ids().await {
+        Ok(ids) => ids,
+        Err(e) => {
+            tracing::error!("Failed to get tracked game IDs for auto-populate: {e}");
+            return;
+        }
+    };
+
+    if app_ids.is_empty() {
+        return;
+    }
+
+    tracing::info!("Auto-populating historical data for {} game(s), {} day(s) back...", app_ids.len(), state.auto_populate_days);
+
+    for app_id in app_ids {
+        auto_populate_game(state, &steam, app_id).await;
+    }
+
+    tracing::info!("Auto-populate complete.");
+}
+
+/// Auto-populate historical data for a single game, backfilling missing days.
+pub async fn auto_populate_game(state: &AppState, steam: &SteamClient, app_id: u32) {
+    let days = state.auto_populate_days;
+    if days == 0 {
+        return;
+    }
+
+    let crawled_dates = match state.db.get_crawled_dates_for_game(app_id).await {
+        Ok(dates) => dates,
+        Err(e) => {
+            tracing::error!("Failed to get crawled dates for app {app_id}: {e}");
+            return;
+        }
+    };
+
+    let today = Utc::now().with_timezone(&Pacific).date_naive();
+    let mut backfilled = 0u32;
+
+    for days_ago in (1..=days).rev() {
+        let date = today - chrono::Duration::days(days_ago as i64);
+        let date_str = date.format("%Y-%m-%d").to_string();
+
+        if crawled_dates.contains(&date_str) {
+            continue;
+        }
+
+        match steam.fetch_wishlist_for_date(app_id, &date_str).await {
+            Ok(report) => {
+                // Set fetched_at to end-of-day for the historical date so ordering is correct
+                let fetched_at = format!("{date_str}T23:59:59Z");
+                if let Err(e) = state.db.insert_backfill_snapshot(&report, &fetched_at).await {
+                    tracing::error!("Failed to backfill snapshot for app {app_id} on {date_str}: {e}");
+                } else {
+                    backfilled += 1;
+                }
+            }
+            Err(e) => {
+                tracing::debug!("No data for app {app_id} on {date_str}: {e}");
+            }
+        }
+
+        // Mark as crawled regardless of whether data was available
+        if let Err(e) = state.db.mark_date_crawled(app_id, &date_str).await {
+            tracing::error!("Failed to mark date {date_str} as crawled for app {app_id}: {e}");
+        }
+    }
+
+    if backfilled > 0 {
+        tracing::info!("Backfilled {backfilled} day(s) of data for app {app_id}");
+    }
 }
 
 async fn polling_loop(state: AppState, poll_interval_minutes: u64) {

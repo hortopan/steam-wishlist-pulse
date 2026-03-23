@@ -4,8 +4,12 @@
   import { api, AuthError } from "./api";
   import { timeAgo } from "./utils";
   import { POLL_INTERVAL, TICK_INTERVAL, FLASH_DURATION, FLASH_ROW_DURATION, METRIC_KEYS } from "./constants";
-  import type { GameReport, GameDetailResponse } from "./types";
+  import type { GameReport, GameDetailResponse, CountryEntry } from "./types";
   import Chart from "./Chart.svelte";
+
+  function countryFlag(code: string): string {
+    return [...code.toUpperCase()].map(c => String.fromCodePoint(0x1F1E6 + c.charCodeAt(0) - 65)).join("");
+  }
 
   let {
     appId,
@@ -158,7 +162,7 @@
           class:flash={flashMetrics.has("deletes")}
         >
           <div class="stat-big-value">
-            -{data.latest.deletes.toLocaleString()}
+            {data.latest.deletes > 0 ? "-" : ""}{data.latest.deletes.toLocaleString()}
           </div>
           <div class="stat-big-label">Wishlist Deletes</div>
         </div>
@@ -179,6 +183,29 @@
           <div class="stat-big-label">Gifts</div>
         </div>
       </div>
+
+      <!-- Platform Breakdown -->
+      {@const totalPlatform = data.latest.adds_windows + data.latest.adds_mac + data.latest.adds_linux}
+      {@const pctWin = totalPlatform ? (data.latest.adds_windows / totalPlatform) * 100 : 0}
+      {@const pctMac = totalPlatform ? (data.latest.adds_mac / totalPlatform) * 100 : 0}
+      {@const pctLinux = totalPlatform ? (data.latest.adds_linux / totalPlatform) * 100 : 0}
+      {#if totalPlatform > 0}
+        <div class="platform-section">
+          <h3 class="section-subtitle">Adds by Platform</h3>
+          <div class="platform-bars">
+            <div class="platform-bar-track">
+              {#if pctWin > 0}<div class="platform-segment seg-windows" style="width:{pctWin}%"></div>{/if}
+              {#if pctMac > 0}<div class="platform-segment seg-mac" style="width:{pctMac}%"></div>{/if}
+              {#if pctLinux > 0}<div class="platform-segment seg-linux" style="width:{pctLinux}%"></div>{/if}
+            </div>
+            <div class="platform-legend">
+              <span class="legend-item"><span class="legend-dot dot-windows"></span> Windows {data.latest.adds_windows.toLocaleString()} ({pctWin.toFixed(1)}%)</span>
+              <span class="legend-item"><span class="legend-dot dot-mac"></span> macOS {data.latest.adds_mac.toLocaleString()} ({pctMac.toFixed(1)}%)</span>
+              <span class="legend-item"><span class="legend-dot dot-linux"></span> Linux {data.latest.adds_linux.toLocaleString()} ({pctLinux.toFixed(1)}%)</span>
+            </div>
+          </div>
+        </div>
+      {/if}
 
       <!-- Net Change -->
       {@const net = data.latest.adds - data.latest.deletes}
@@ -201,6 +228,38 @@
     <!-- Chart -->
     <Chart history={data.history} />
 
+    <!-- Top Countries (latest snapshot) -->
+    {#if data.latest && data.latest.countries.length > 0}
+      {@const sortedCountries = [...data.latest.countries].sort((a, b) => b.adds - a.adds)}
+      <div class="countries-section">
+        <h2>Top Countries <span class="muted-count">({data.latest.countries.length} total)</span></h2>
+        <div class="countries-table-wrap">
+          <table class="history-table">
+            <thead>
+              <tr>
+                <th>Country</th>
+                <th class="num">Adds</th>
+                <th class="num">Deletes</th>
+                <th class="num">Purchases</th>
+                <th class="num">Gifts</th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each sortedCountries.slice(0, 20) as country}
+                <tr>
+                  <td class="country-cell"><span class="country-flag">{countryFlag(country.country_code)}</span> {country.country_code}</td>
+                  <td class="num adds">+{country.adds.toLocaleString()}</td>
+                  <td class="num deletes">{country.deletes > 0 ? "-" : ""}{country.deletes.toLocaleString()}</td>
+                  <td class="num purchases">{country.purchases.toLocaleString()}</td>
+                  <td class="num gifts">{country.gifts.toLocaleString()}</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    {/if}
+
     <!-- Snapshot History Table -->
     {#if data.history.length > 0}
       <div class="history-section">
@@ -210,10 +269,13 @@
             <thead>
               <tr>
                 <th>Date</th>
-                <th class="num">Wishlist Adds</th>
-                <th class="num">Wishlist Deletes</th>
+                <th class="num">Adds</th>
+                <th class="num">Deletes</th>
                 <th class="num">Purchases</th>
                 <th class="num">Gifts</th>
+                <th class="num platform-col">Win</th>
+                <th class="num platform-col">Mac</th>
+                <th class="num platform-col">Linux</th>
                 <th>Recorded</th>
               </tr>
             </thead>
@@ -222,11 +284,12 @@
                 <tr class:flash-row={flashRows.has(entry.date)}>
                   <td>{entry.date.split("T")[0]}</td>
                   <td class="num adds">+{entry.adds.toLocaleString()}</td>
-                  <td class="num deletes">-{entry.deletes.toLocaleString()}</td>
-                  <td class="num purchases"
-                    >{entry.purchases.toLocaleString()}</td
-                  >
+                  <td class="num deletes">{entry.deletes > 0 ? "-" : ""}{entry.deletes.toLocaleString()}</td>
+                  <td class="num purchases">{entry.purchases.toLocaleString()}</td>
                   <td class="num gifts">{entry.gifts.toLocaleString()}</td>
+                  <td class="num platform-val">{entry.adds_windows.toLocaleString()}</td>
+                  <td class="num platform-val">{entry.adds_mac.toLocaleString()}</td>
+                  <td class="num platform-val">{entry.adds_linux.toLocaleString()}</td>
                   <td class="muted"
                     >{entry.fetched_at
                       ? timeAgo(entry.fetched_at, now)
@@ -506,6 +569,113 @@
     border: 1px solid var(--border);
     border-radius: 0.75rem;
     margin-bottom: 1.5rem;
+  }
+
+  /* Platform breakdown */
+  .platform-section {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 0.75rem;
+    padding: 1rem 1.25rem;
+    margin-bottom: 1rem;
+  }
+
+  .section-subtitle {
+    font-size: 0.85rem;
+    font-weight: 600;
+    margin-bottom: 0.75rem;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  .platform-bar-track {
+    display: flex;
+    height: 0.5rem;
+    border-radius: 0.25rem;
+    overflow: hidden;
+    background: rgba(255, 255, 255, 0.05);
+    margin-bottom: 0.6rem;
+  }
+
+  .platform-segment {
+    height: 100%;
+    transition: width 0.4s ease;
+  }
+
+  .seg-windows { background: #0078d4; }
+  .seg-mac { background: #a3aaae; }
+  .seg-linux { background: #e95420; }
+
+  .platform-legend {
+    display: flex;
+    gap: 1.25rem;
+    flex-wrap: wrap;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+  }
+
+  .legend-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+  }
+
+  .legend-dot {
+    display: inline-block;
+    width: 0.55rem;
+    height: 0.55rem;
+    border-radius: 50%;
+  }
+
+  .dot-windows { background: #0078d4; }
+  .dot-mac { background: #a3aaae; }
+  .dot-linux { background: #e95420; }
+
+  /* Countries */
+  .countries-section {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 0.75rem;
+    padding: 1.5rem;
+    margin-bottom: 1.5rem;
+  }
+
+  .countries-section h2 {
+    font-size: 1.1rem;
+    font-weight: 600;
+    margin-bottom: 1rem;
+  }
+
+  .muted-count {
+    font-size: 0.8rem;
+    font-weight: 400;
+    color: var(--text-muted);
+  }
+
+  .countries-table-wrap {
+    overflow-x: auto;
+  }
+
+  .country-cell {
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  .country-flag {
+    font-size: 1.1em;
+  }
+
+  /* Platform columns in history */
+  .platform-col {
+    color: var(--text-muted);
+    font-size: 0.7rem;
+  }
+
+  .platform-val {
+    color: var(--text-muted);
+    font-size: 0.8rem;
   }
 
   /* History table */

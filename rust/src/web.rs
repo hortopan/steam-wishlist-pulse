@@ -129,10 +129,11 @@ pub struct AppState {
     login_attempts: RateLimiter,
     cached_jwt_secret: Arc<tokio::sync::Mutex<Option<String>>>,
     insecure: bool,
+    pub auto_populate_days: u32,
 }
 
 impl AppState {
-    pub fn new(db: Database, steam: Option<SteamClient>, insecure: bool) -> Self {
+    pub fn new(db: Database, steam: Option<SteamClient>, insecure: bool, auto_populate_days: u32) -> Self {
         if insecure {
             tracing::warn!("Running with --insecure: cookies will not require HTTPS");
         }
@@ -144,6 +145,7 @@ impl AppState {
             login_attempts: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             cached_jwt_secret: Arc::new(tokio::sync::Mutex::new(None)),
             insecure,
+            auto_populate_days,
         }
     }
 
@@ -436,6 +438,10 @@ struct GameReport {
     deletes: u64,
     purchases: u64,
     gifts: u64,
+    adds_windows: u64,
+    adds_mac: u64,
+    adds_linux: u64,
+    countries: Vec<crate::steam::CountryReport>,
     changed_at: Option<String>,
 }
 
@@ -451,6 +457,10 @@ struct SnapshotEntry {
     deletes: u64,
     purchases: u64,
     gifts: u64,
+    adds_windows: u64,
+    adds_mac: u64,
+    adds_linux: u64,
+    countries: Vec<crate::steam::CountryReport>,
     fetched_at: String,
 }
 
@@ -807,6 +817,10 @@ async fn api_wishlist(State(state): State<AppState>, jar: CookieJar) -> Response
                 deletes: report.deletes,
                 purchases: report.purchases,
                 gifts: report.gifts,
+                adds_windows: report.adds_windows,
+                adds_mac: report.adds_mac,
+                adds_linux: report.adds_linux,
+                countries: report.countries,
                 changed_at: report.fetched_at,
             }
         })
@@ -865,6 +879,10 @@ async fn api_game_detail(
                 deletes: report.deletes,
                 purchases: report.purchases,
                 gifts: report.gifts,
+                adds_windows: report.adds_windows,
+                adds_mac: report.adds_mac,
+                adds_linux: report.adds_linux,
+                countries: report.countries,
                 changed_at: report.fetched_at,
             }
         });
@@ -881,6 +899,10 @@ async fn api_game_detail(
             deletes: s.deletes,
             purchases: s.purchases,
             gifts: s.gifts,
+            adds_windows: s.adds_windows,
+            adds_mac: s.adds_mac,
+            adds_linux: s.adds_linux,
+            countries: s.countries,
             fetched_at: s.fetched_at.unwrap_or_default(),
         })
         .collect();
@@ -1377,6 +1399,15 @@ async fn api_admin_track_game(
                         tracing::warn!("Failed to fetch initial data for {app_id}: {e}");
                     }
                 }
+
+                // Auto-populate historical data in background
+                if state.auto_populate_days > 0 {
+                    let bg_state = state.clone();
+                    let bg_steam = steam.clone();
+                    tokio::spawn(async move {
+                        crate::auto_populate_game(&bg_state, &bg_steam, app_id).await;
+                    });
+                }
             }
 
             Json(serde_json::json!({
@@ -1509,6 +1540,10 @@ async fn debug_test_change(
         deletes: 100,
         purchases: 50,
         gifts: 10,
+        adds_windows: 0,
+        adds_mac: 0,
+        adds_linux: 0,
+        countries: Vec::new(),
         fetched_at: None,
     });
 
@@ -1520,6 +1555,10 @@ async fn debug_test_change(
         deletes: base.deletes + d_deletes,
         purchases: base.purchases + d_purchases,
         gifts: base.gifts + d_gifts,
+        adds_windows: 0,
+        adds_mac: 0,
+        adds_linux: 0,
+        countries: Vec::new(),
         fetched_at: None,
     };
 
