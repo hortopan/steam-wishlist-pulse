@@ -181,8 +181,11 @@ Options can be set via CLI flags, environment variables, or both (passwords are 
 | —                         | `READ_PASSWORD`         | *(set via UI)*                          | Read-only password (env only)               |
 | `--poll-interval-minutes` | `POLL_INTERVAL_MINUTES` | `5`                                     | Steam polling interval                      |
 | `--insecure`              | —                       | `false`                                 | Disable HTTPS cookie requirement (dev only) |
+| —                         | `ENCRYPTION_SECRET`     | *(none)*                                | Passphrase for encrypting sensitive data at rest |
 
 Passwords must be set via environment variables (not CLI flags). Other options accept CLI flags or env vars, but the same option cannot appear in both. Everything else — API keys, Telegram config, tracked games, retention — is managed through the dashboard.
+
+> **Encryption at rest:** API keys, bot tokens, and other secrets you enter through the dashboard are stored in the SQLite database. By default they are stored in plaintext. Set `ENCRYPTION_SECRET` to any strong passphrase and all sensitive values will be encrypted with AES-256-GCM before being written to disk. **This is strongly recommended** — especially if the database file lives on shared storage or is included in backups. The secret is used to derive an encryption key via HKDF-SHA256; changing it later will require re-entering your stored credentials.
 
 ---
 
