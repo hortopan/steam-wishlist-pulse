@@ -20,6 +20,10 @@ export interface GameReport {
   adds_linux: number;
   countries: CountryEntry[];
   changed_at: string | null;
+  total_adds: number;
+  total_deletes: number;
+  total_purchases: number;
+  total_gifts: number;
 }
 
 export interface AnomalyMetrics {
@@ -27,9 +31,39 @@ export interface AnomalyMetrics {
   deletes: boolean;
   purchases: boolean;
   gifts: boolean;
+  descriptions?: string[];
 }
 
-export interface SnapshotEntry {
+// ── Split API types ──────────────────────────────────────────────
+
+export interface GameDetailResponse {
+  app_id: number;
+  name: string;
+  image_url: string;
+  latest: GameReport | null;
+  total_snapshots: number;
+}
+
+export interface ChartPoint {
+  label: string;
+  adds: number;
+  deletes: number;
+  purchases: number;
+  gifts: number;
+  adds_windows: number;
+  adds_mac: number;
+  adds_linux: number;
+  is_anomaly: boolean;
+  anomaly_metrics: AnomalyMetrics;
+}
+
+export interface ChartResponse {
+  resolution: string;
+  points: ChartPoint[];
+}
+
+export interface HistoryEntry {
+  snapshot_id: number;
   date: string;
   adds: number;
   deletes: number;
@@ -38,18 +72,21 @@ export interface SnapshotEntry {
   adds_windows: number;
   adds_mac: number;
   adds_linux: number;
-  countries: CountryEntry[];
   fetched_at: string;
   is_anomaly: boolean;
   anomaly_metrics: AnomalyMetrics;
 }
 
-export interface GameDetailResponse {
-  app_id: number;
-  name: string;
-  image_url: string;
-  latest: GameReport | null;
-  history: SnapshotEntry[];
+export interface PaginatedHistoryResponse {
+  entries: HistoryEntry[];
+  total: number;
+  page: number;
+  per_page: number;
+}
+
+export interface SnapshotCountriesResponse {
+  snapshot_id: number;
+  countries: CountryEntry[];
 }
 
 export interface TrackedGame {

@@ -1,18 +1,37 @@
 <script lang="ts">
-  import type { SnapshotEntry } from './types';
+  import type { ChartPoint } from './types';
   import { METRIC_CONFIG, METRIC_KEYS } from './constants';
   import { formatNumber } from './utils';
 
-  let { history }: { history: SnapshotEntry[] } = $props();
+  let {
+    history,
+    resolution,
+    chartRange,
+    onRangeChange,
+    ranges,
+    loading = false,
+  }: {
+    history: ChartPoint[];
+    resolution: string;
+    chartRange: string;
+    onRangeChange: (range: any) => void;
+    ranges: { key: string; label: string }[];
+    loading?: boolean;
+  } = $props();
 
   let activeMetrics = $state<Set<string>>(new Set(METRIC_KEYS));
   let hoveredPoint = $state<{
     x: number;
     y: number;
-    entry: SnapshotEntry;
+    entry: ChartPoint;
     metric: string;
     value: number;
     prevValue: number | null;
+  } | null>(null);
+  let hoveredAnomaly = $state<{
+    x: number;
+    y: number;
+    entry: ChartPoint;
   } | null>(null);
 
   const CHART_W = 800;
@@ -29,7 +48,7 @@
     activeMetrics = next;
   }
 
-  function buildChartData(entries: SnapshotEntry[], metrics: Set<string>) {
+  function buildChartData(entries: ChartPoint[], metrics: Set<string>) {
     if (entries.length === 0) return null;
 
     const activeKeys = METRIC_KEYS.filter((m) => metrics.has(m));
@@ -58,7 +77,7 @@
         points: {
           cx: number;
           cy: number;
-          entry: SnapshotEntry;
+          entry: ChartPoint;
           value: number;
           prevValue: number | null;
         }[];
@@ -83,15 +102,26 @@
       yTicks.push({ y: yScale(v), label: formatNumber(v) });
     }
 
-    const uniqueDates = new Set(entries.map((e) => e.date.split("T")[0]));
-    const sameDay = uniqueDates.size === 1;
-    const xLabels = entries.map((e, i) => ({
-      x: xScale(i),
-      label: sameDay
-        ? (e.fetched_at || e.date).split("T")[1]?.slice(0, 5) ||
-          e.date.split("T")[0].slice(5)
-        : e.date.split("T")[0].slice(5),
-    }));
+    // Format X labels based on resolution
+    const xLabels = entries.map((e, i) => {
+      let label: string;
+      if (resolution === "raw") {
+        // For raw, show time if same day, otherwise date
+        const dateStr = e.label.split("T")[0]?.slice(5) ?? e.label;
+        const timeStr = e.label.split("T")[1]?.slice(0, 5);
+        const uniqueDates = new Set(entries.map(en => en.label.split("T")[0]));
+        label = uniqueDates.size === 1 && timeStr ? timeStr : dateStr;
+      } else if (resolution === "weekly") {
+        label = e.label; // "2025-W03" format
+      } else if (resolution === "monthly") {
+        label = e.label; // "2025-01" format
+      } else {
+        // daily
+        label = e.label.slice(5); // "MM-DD"
+      }
+      return { x: xScale(i), label };
+    });
+
     const maxLabels = 12;
     let filteredXLabels = xLabels;
     if (xLabels.length > maxLabels) {
@@ -101,7 +131,21 @@
       );
     }
 
-    return { paths, yTicks, xLabels: filteredXLabels, plotW, plotH };
+    // Collect anomaly marker positions (one per anomalous chart point, at topmost y)
+    const anomalyPoints: { x: number; y: number; entry: ChartPoint }[] = [];
+    for (let i = 0; i < entries.length; i++) {
+      if (!entries[i].is_anomaly) continue;
+      const x = xScale(i);
+      let minY = PAD.top + plotH; // bottom
+      for (const m of activeKeys) {
+        const v = (entries[i] as any)[m] as number;
+        const y = yScale(v);
+        if (y < minY) minY = y;
+      }
+      anomalyPoints.push({ x, y: minY, entry: entries[i] });
+    }
+
+    return { paths, yTicks, xLabels: filteredXLabels, plotW, plotH, anomalyPoints };
   }
 
   let chartData = $derived(buildChartData(history, activeMetrics));
@@ -116,22 +160,40 @@
   <div class="chart-section">
     <div class="chart-header">
       <h2>Historical Trends</h2>
-      <div class="chart-legend">
-        {#each Object.entries(METRIC_CONFIG) as [key, cfg]}
-          <button
-            class="legend-btn"
-            class:active={activeMetrics.has(key)}
-            style="--metric-color: {cfg.color}"
-            onclick={() => toggleMetric(key)}
-          >
-            <span class="legend-dot"></span>
-            {cfg.label}
-          </button>
-        {/each}
+      <div class="chart-controls">
+        <div class="range-selector">
+          {#each ranges as r}
+            <button
+              class="range-btn"
+              class:active={chartRange === r.key}
+              onclick={() => onRangeChange(r.key)}
+            >
+              {r.label}
+            </button>
+          {/each}
+        </div>
+        <div class="chart-legend">
+          {#each Object.entries(METRIC_CONFIG) as [key, cfg]}
+            <button
+              class="legend-btn"
+              class:active={activeMetrics.has(key)}
+              style="--metric-color: {cfg.color}"
+              onclick={() => toggleMetric(key)}
+            >
+              <span class="legend-dot"></span>
+              {cfg.label}
+            </button>
+          {/each}
+        </div>
       </div>
     </div>
     <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="chart-container" onmouseleave={() => (hoveredPoint = null)}>
+    <div class="chart-container" class:chart-loading={loading} onmouseleave={() => (hoveredPoint = null)}>
+      {#if loading}
+        <div class="chart-overlay">
+          <div class="chart-spinner"></div>
+        </div>
+      {/if}
       <svg
         viewBox="0 0 {CHART_W} {CHART_H}"
         preserveAspectRatio="xMidYMid meet"
@@ -176,18 +238,6 @@
             opacity="0.9"
           />
           {#each pathData.points as pt}
-            {@const isMetricAnomaly = pt.entry.anomaly_metrics?.[metric as keyof typeof pt.entry.anomaly_metrics] ?? false}
-            {#if isMetricAnomaly}
-              <circle
-                cx={pt.cx}
-                cy={pt.cy}
-                r="10"
-                fill="none"
-                stroke="var(--red, #ef4444)"
-                stroke-width="2"
-                opacity="0.5"
-              />
-            {/if}
             <!-- svelte-ignore a11y_no_static_element_interactions -->
             <circle
               cx={pt.cx}
@@ -197,7 +247,7 @@
                 ? 6
                 : 4}
               fill={METRIC_CONFIG[metric].color}
-              stroke={isMetricAnomaly ? "var(--red, #ef4444)" : "var(--surface)"}
+              stroke="var(--surface)"
               stroke-width="2"
               style="cursor: pointer;"
               onmouseenter={() =>
@@ -211,6 +261,30 @@
                 })}
             />
           {/each}
+        {/each}
+
+        <!-- Anomaly markers -->
+        {#each chartData.anomalyPoints as ap}
+          <g
+            style="cursor: pointer"
+            onmouseenter={() => hoveredAnomaly = { x: ap.x, y: ap.y, entry: ap.entry }}
+            onmouseleave={() => hoveredAnomaly = null}
+          >
+            <polygon
+              points="{ap.x},{ap.y - 16} {ap.x - 6},{ap.y - 6} {ap.x + 6},{ap.y - 6}"
+              fill="var(--red)"
+              opacity="0.9"
+            />
+            <text
+              x={ap.x}
+              y={ap.y - 8}
+              fill="white"
+              font-size="8"
+              font-weight="bold"
+              text-anchor="middle"
+              dominant-baseline="middle"
+            >!</text>
+          </g>
         {/each}
       </svg>
 
@@ -227,8 +301,7 @@
               : '-50%'}, -120%);"
         >
           <div class="tooltip-date">
-            {hoveredPoint.entry.date.split("T")[0]}
-            {#if hoveredPoint.entry.anomaly_metrics?.[hoveredPoint.metric as keyof typeof hoveredPoint.entry.anomaly_metrics]}<span class="tooltip-anomaly">&#9888; Anomaly</span>{/if}
+            {hoveredPoint.entry.label}
           </div>
           <div
             class="tooltip-value"
@@ -241,6 +314,31 @@
               <span class="tooltip-delta" class:positive={delta > 0} class:negative={delta < 0}>({delta > 0 ? '+' : ''}{delta.toLocaleString()})</span>
             {/if}
           </div>
+          <div class="tooltip-resolution">{resolution}</div>
+        </div>
+      {/if}
+
+      {#if hoveredAnomaly}
+        {@const tipX = (hoveredAnomaly.x / CHART_W) * 100}
+        {@const tipY = (hoveredAnomaly.y / CHART_H) * 100}
+        {@const descs = hoveredAnomaly.entry.anomaly_metrics?.descriptions ?? []}
+        <div
+          class="tooltip anomaly-tooltip"
+          style="left: {tipX}%; top: {tipY}%; transform: translate({tipX >
+          80
+            ? '-100%'
+            : tipX < 20
+              ? '0%'
+              : '-50%'}, -120%);"
+        >
+          <div class="tooltip-date">{hoveredAnomaly.entry.label}</div>
+          {#if descs.length > 0}
+            {#each descs as desc}
+              <div class="anomaly-desc">{desc}</div>
+            {/each}
+          {:else}
+            <div class="anomaly-desc">Anomalous change detected</div>
+          {/if}
         </div>
       {/if}
     </div>
@@ -274,6 +372,47 @@
     margin-bottom: 1rem;
     flex-wrap: wrap;
     gap: 0.75rem;
+  }
+
+  .chart-controls {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+  }
+
+  .range-selector {
+    display: flex;
+    gap: 0;
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+    overflow: hidden;
+  }
+
+  .range-btn {
+    background: transparent;
+    border: none;
+    border-right: 1px solid var(--border);
+    color: var(--text-muted);
+    padding: 0.3rem 0.65rem;
+    cursor: pointer;
+    font-size: 0.75rem;
+    font-weight: 500;
+    transition: all 0.2s;
+  }
+
+  .range-btn:last-child {
+    border-right: none;
+  }
+
+  .range-btn.active {
+    background: var(--accent);
+    color: white;
+  }
+
+  .range-btn:hover:not(.active) {
+    background: rgba(99, 102, 241, 0.1);
+    color: var(--accent);
   }
 
   .chart-legend {
@@ -315,20 +454,41 @@
     width: 100%;
   }
 
+  .chart-container.chart-loading svg {
+    opacity: 0.35;
+    transition: opacity 0.2s ease;
+  }
+
+  .chart-overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 5;
+    pointer-events: none;
+  }
+
+  .chart-spinner {
+    width: 1.5rem;
+    height: 1.5rem;
+    border: 3px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: chart-spin 0.8s linear infinite;
+  }
+
+  @keyframes chart-spin {
+    to { transform: rotate(360deg); }
+  }
+
   .chart-container svg {
     width: 100%;
     height: auto;
   }
 
-  .chart-container svg path {
-    transition: d 0.5s ease-out;
-  }
-
   .chart-container svg circle {
-    transition:
-      cx 0.5s ease-out,
-      cy 0.5s ease-out,
-      r 0.15s ease-out;
+    transition: r 0.15s ease-out;
   }
 
   .tooltip {
@@ -347,12 +507,6 @@
     font-size: 0.7rem;
     color: var(--text-muted);
     margin-bottom: 0.2rem;
-  }
-
-  .tooltip-anomaly {
-    color: var(--red, #ef4444);
-    font-weight: 600;
-    margin-left: 0.35rem;
   }
 
   .tooltip-value {
@@ -374,6 +528,28 @@
 
   .tooltip-delta.negative {
     color: var(--red);
+  }
+
+  .tooltip-resolution {
+    font-size: 0.65rem;
+    color: var(--text-muted);
+    margin-top: 0.15rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  .anomaly-tooltip {
+    border-color: var(--red);
+  }
+
+  .anomaly-desc {
+    font-size: 0.78rem;
+    color: var(--red);
+    font-weight: 500;
+  }
+
+  .anomaly-desc + .anomaly-desc {
+    margin-top: 0.15rem;
   }
 
   .chart-placeholder {

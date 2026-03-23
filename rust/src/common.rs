@@ -218,13 +218,26 @@ impl ChangeMessage {
             let make_flag = |name: &str| -> MetricAnomalyFlag {
                 if let Some(m) = a.metrics.iter().find(|m| m.name == name) {
                     if m.is_anomalous {
+                        let abs_rate = m.current_rate.abs();
+                        let abs_median = m.mean.abs();
+                        let detail = if abs_median < 0.01 {
+                            if m.current_rate > 0.0 {
+                                format!("surged to {:.0}/day from near-zero baseline", abs_rate)
+                            } else {
+                                format!("dropped to {:.0}/day from near-zero baseline", abs_rate)
+                            }
+                        } else {
+                            let ratio = abs_rate / abs_median;
+                            let direction = if m.current_rate > m.mean { "above" } else { "below" };
+                            if ratio >= 2.0 {
+                                format!("{:.0}× {direction} normal ({:.0}/day vs ~{:.0}/day)", ratio, abs_rate, abs_median)
+                            } else {
+                                format!("unusual at {:.0}/day ({direction} ~{:.0}/day typical)", abs_rate, abs_median)
+                            }
+                        };
                         MetricAnomalyFlag {
                             is_anomalous: true,
-                            detail: format!(
-                                "delta: {} ({:.1}/day), median: {:.1}/day, MAD: {:.1}, range: [{:.0}, {:.0}]",
-                                m.current_delta, m.current_rate, m.mean, m.std_dev,
-                                m.threshold_low, m.threshold_high,
-                            ),
+                            detail,
                         }
                     } else {
                         MetricAnomalyFlag {
@@ -244,11 +257,28 @@ impl ChangeMessage {
                 .country_anomalies
                 .iter()
                 .map(|c| {
-                    let sign = if c.current_delta >= 0 { "+" } else { "" };
-                    format!(
-                        "{}: {}{} {} (median: {:.1}, MAD: {:.1})",
-                        c.country_code, sign, c.current_delta, c.metric, c.mean, c.std_dev
-                    )
+                    let abs_rate = c.current_rate.abs();
+                    let abs_median = c.mean.abs();
+                    let direction = if c.current_rate > c.mean { "above" } else { "below" };
+                    if abs_median < 0.01 {
+                        format!(
+                            "{}: {} surged to {:.0}/day from near-zero",
+                            c.country_code, c.metric, abs_rate
+                        )
+                    } else {
+                        let ratio = abs_rate / abs_median;
+                        if ratio >= 2.0 {
+                            format!(
+                                "{}: {} {:.0}× {direction} normal ({:.0}/day vs ~{:.0}/day)",
+                                c.country_code, c.metric, ratio, abs_rate, abs_median
+                            )
+                        } else {
+                            format!(
+                                "{}: {} unusual at {:.0}/day ({direction} ~{:.0}/day)",
+                                c.country_code, c.metric, abs_rate, abs_median
+                            )
+                        }
+                    }
                 })
                 .collect();
 

@@ -34,7 +34,7 @@ async fn main() {
     tracing::info!("Database: {}", config.database_path.display());
     tracing::info!("Web interface: {}", config.bind_web_interface);
     tracing::info!("Poll interval: {} minutes", config.poll_interval_minutes);
-    tracing::info!("Auto-populate days: {}", config.auto_populate_days);
+    tracing::info!("Backfill rate: {} req/sec", config.backfill_rate);
 
     let db = Database::open(&config.database_path)
         .unwrap_or_else(|e| {
@@ -113,11 +113,11 @@ async fn main() {
     };
     let steam = steam_api_key.map(|key| {
         tracing::info!("Steam API key configured");
-        SteamClient::new(key)
+        SteamClient::new(key, config.backfill_rate)
     });
 
     // Build shared application state
-    let app_state = AppState::new(db, steam, config.insecure, config.auto_populate_days, config.encryption_secret.clone());
+    let app_state = AppState::new(db, steam, config.insecure, config.encryption_secret.clone(), config.backfill_rate);
 
     // Kick off version check so the cache is warm before the first request
     {
@@ -127,11 +127,11 @@ async fn main() {
         });
     }
 
-    // Auto-populate historical data on startup
-    if config.auto_populate_days > 0 {
+    // Backfill full history for all tracked games on startup
+    {
         let state = app_state.clone();
         tokio::spawn(async move {
-            auto_populate_all_games(&state).await;
+            backfill_all_games(&state).await;
         });
     }
 
@@ -154,12 +154,12 @@ async fn main() {
     web::run_web(config.bind_web_interface, app_state).await;
 }
 
-/// Auto-populate historical data for all tracked games.
-async fn auto_populate_all_games(state: &AppState) {
+/// Backfill full history for all tracked games.
+async fn backfill_all_games(state: &AppState) {
     let steam = match state.get_steam().await {
         Some(s) => s,
         None => {
-            tracing::debug!("No Steam API key configured, skipping auto-populate.");
+            tracing::debug!("No Steam API key configured, skipping backfill.");
             return;
         }
     };
@@ -167,7 +167,7 @@ async fn auto_populate_all_games(state: &AppState) {
     let app_ids = match state.db.get_tracked_game_ids().await {
         Ok(ids) => ids,
         Err(e) => {
-            tracing::error!("Failed to get tracked game IDs for auto-populate: {e}");
+            tracing::error!("Failed to get tracked game IDs for backfill: {e}");
             return;
         }
     };
@@ -176,67 +176,185 @@ async fn auto_populate_all_games(state: &AppState) {
         return;
     }
 
-    println!("{}", format!("Syncing look-back period: {} day(s) for {} game(s)...", state.auto_populate_days, app_ids.len()).cyan());
+    println!("{}", format!("Starting full history backfill for {} game(s)...", app_ids.len()).cyan());
 
     for app_id in app_ids {
-        auto_populate_game(state, &steam, app_id).await;
+        let token = state.start_backfill(app_id).await;
+        backfill_game_history(state, &steam, app_id, token).await;
     }
 
-    println!("{}", "Look-back sync complete.".cyan());
+    println!("{}", "History backfill complete.".cyan());
 }
 
-/// Auto-populate historical data for a single game, backfilling missing days.
-pub async fn auto_populate_game(state: &AppState, steam: &SteamClient, app_id: u32) {
-    let days = state.auto_populate_days;
-    if days == 0 {
-        return;
-    }
+/// Backfill full history for a single game, from app_min_date to yesterday.
+pub async fn backfill_game_history(
+    state: &AppState,
+    steam: &SteamClient,
+    app_id: u32,
+    token: tokio_util::sync::CancellationToken,
+) {
+    use chrono::NaiveDate;
 
-    let crawled_dates = match state.db.get_crawled_dates_for_game(app_id).await {
-        Ok(dates) => dates,
+    // 1. Get app_min_date (from DB cache or by fetching current data)
+    let min_date_str = match state.db.get_app_min_date(app_id).await {
+        Ok(Some(d)) => d,
+        _ => {
+            // Not cached yet — fetch current data to discover it
+            match steam.fetch_wishlist(app_id).await {
+                Ok(report) => {
+                    if let Some(ref d) = report.app_min_date {
+                        let _ = state.db.store_app_min_date(app_id, d).await;
+                        d.clone()
+                    } else {
+                        tracing::debug!("No app_min_date for app {app_id}, skipping backfill");
+                        state.finish_backfill(app_id).await;
+                        return;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to fetch data for app {app_id} to discover min_date: {e}");
+                    state.finish_backfill(app_id).await;
+                    return;
+                }
+            }
+        }
+    };
+
+    let min_date = match NaiveDate::parse_from_str(&min_date_str, "%Y-%m-%d") {
+        Ok(d) => d,
         Err(e) => {
-            tracing::error!("Failed to get crawled dates for app {app_id}: {e}");
+            tracing::error!("Invalid app_min_date '{min_date_str}' for app {app_id}: {e}");
+            state.finish_backfill(app_id).await;
             return;
         }
     };
 
-    let today = Utc::now().with_timezone(&Pacific).date_naive();
-    let mut backfilled = 0u32;
+    let yesterday = Utc::now().with_timezone(&Pacific).date_naive() - chrono::Duration::days(1);
+    if min_date > yesterday {
+        tracing::debug!("app {app_id}: min_date {min_date} is not before yesterday, nothing to backfill");
+        state.finish_backfill(app_id).await;
+        return;
+    }
 
-    for days_ago in (1..=days).rev() {
-        let date = today - chrono::Duration::days(days_ago as i64);
+    // 2. Load already-crawled and failed dates
+    let crawled_dates = match state.db.get_crawled_dates_for_game(app_id).await {
+        Ok(dates) => dates,
+        Err(e) => {
+            tracing::error!("Failed to get crawled dates for app {app_id}: {e}");
+            state.finish_backfill(app_id).await;
+            return;
+        }
+    };
+    let failed_dates = state.db.get_failed_dates(app_id).await.unwrap_or_default();
+
+    // 3. Generate dates to backfill (newest to oldest — recent data first)
+    let mut dates_to_fetch: Vec<String> = Vec::new();
+    let mut date = yesterday;
+    while date >= min_date {
         let date_str = date.format("%Y-%m-%d").to_string();
+        if !crawled_dates.contains(&date_str) || failed_dates.contains(&date_str) {
+            dates_to_fetch.push(date_str);
+        }
+        date -= chrono::Duration::days(1);
+    }
 
-        if crawled_dates.contains(&date_str) {
-            continue;
+    if dates_to_fetch.is_empty() {
+        tracing::debug!("app {app_id}: full history already backfilled");
+        state.finish_backfill(app_id).await;
+        return;
+    }
+
+    let total = dates_to_fetch.len();
+    println!("{}", format!("  app {app_id}: backfilling {total} day(s) from {min_date_str}...").cyan());
+
+    let mut backfilled = 0u32;
+    let mut consecutive_failures = 0u32;
+
+    for (i, date_str) in dates_to_fetch.iter().enumerate() {
+        // Check cancellation
+        if token.is_cancelled() {
+            println!("{}", format!("  app {app_id}: backfill cancelled (game untracked)").yellow());
+            return; // Don't call finish_backfill — game is being removed
         }
 
-        match steam.fetch_wishlist_for_date(app_id, &date_str).await {
+        match steam.fetch_wishlist_for_backfill(app_id, date_str).await {
             Ok(report) => {
-                // Set fetched_at to end-of-day for the historical date so ordering is correct
                 let fetched_at = format!("{date_str}T23:59:59Z");
                 if let Err(e) = state.db.insert_backfill_snapshot(&report, &fetched_at).await {
-                    tracing::error!("Failed to backfill snapshot for app {app_id} on {date_str}: {e}");
+                    tracing::error!("Failed to store backfill for app {app_id} on {date_str}: {e}");
                 } else {
                     backfilled += 1;
                 }
+                if let Err(e) = state.db.mark_date_crawled(app_id, date_str).await {
+                    tracing::error!("Failed to mark {date_str} crawled for app {app_id}: {e}");
+                }
+                // Clear from failed dates if it was a retry
+                if failed_dates.contains(date_str) {
+                    let _ = state.db.clear_failed_date(app_id, date_str).await;
+                }
+                consecutive_failures = 0;
             }
             Err(e) => {
-                tracing::debug!("No data for app {app_id} on {date_str}: {e}");
+                // "No data" errors (date before app existed, etc.) are expected — mark crawled
+                let err_str = e.to_string();
+                if err_str.contains("No data for app") || err_str.contains("No wishlist data") {
+                    if let Err(e2) = state.db.mark_date_crawled(app_id, date_str).await {
+                        tracing::error!("Failed to mark {date_str} crawled for app {app_id}: {e2}");
+                    }
+                    if failed_dates.contains(date_str) {
+                        let _ = state.db.clear_failed_date(app_id, date_str).await;
+                    }
+                    consecutive_failures = 0;
+                } else {
+                    // Actual API failure
+                    let _ = state.db.mark_date_failed(app_id, date_str).await;
+                    consecutive_failures += 1;
+                    tracing::warn!("Backfill failed for app {app_id} on {date_str}: {e}");
+
+                    if consecutive_failures >= 5 {
+                        println!("{}", format!("  app {app_id}: {consecutive_failures} consecutive failures, pausing 60s...").yellow());
+                        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+
+                        // Check cancellation after pause
+                        if token.is_cancelled() {
+                            println!("{}", format!("  app {app_id}: backfill cancelled during pause").yellow());
+                            return;
+                        }
+
+                        // Try one more time
+                        match steam.fetch_wishlist_for_backfill(app_id, date_str).await {
+                            Ok(report) => {
+                                let fetched_at = format!("{date_str}T23:59:59Z");
+                                let _ = state.db.insert_backfill_snapshot(&report, &fetched_at).await;
+                                let _ = state.db.mark_date_crawled(app_id, date_str).await;
+                                let _ = state.db.clear_failed_date(app_id, date_str).await;
+                                backfilled += 1;
+                                consecutive_failures = 0;
+                            }
+                            Err(_) => {
+                                println!("{}", format!("  app {app_id}: still failing after pause, aborting backfill (will resume on next startup)").yellow());
+                                state.finish_backfill(app_id).await;
+                                return;
+                            }
+                        }
+                    }
+                }
             }
         }
 
-        // Mark as crawled regardless of whether data was available
-        if let Err(e) = state.db.mark_date_crawled(app_id, &date_str).await {
-            tracing::error!("Failed to mark date {date_str} as crawled for app {app_id}: {e}");
+        // Log progress every 50 dates
+        if (i + 1) % 50 == 0 {
+            println!("{}", format!("  app {app_id}: backfilled {}/{total} dates...", i + 1).cyan());
         }
     }
 
     if backfilled > 0 {
-        println!("{}", format!("  app {app_id}: backfilled {backfilled} day(s)").cyan());
+        println!("{}", format!("  app {app_id}: backfill complete — {backfilled} new day(s)").cyan());
     } else {
-        tracing::debug!("app {app_id}: already up to date");
+        tracing::debug!("app {app_id}: no new data during backfill");
     }
+
+    state.finish_backfill(app_id).await;
 }
 
 async fn polling_loop(state: AppState, poll_interval_minutes: u64) {
@@ -398,12 +516,5 @@ async fn polling_loop(state: AppState, poll_interval_minutes: u64) {
             }
         }
 
-        // Purge old data
-        let retention_days = state.get_retention_days().await;
-        match state.db.purge_old_snapshots(retention_days).await {
-            Ok(0) => {}
-            Ok(n) => tracing::info!("Purged {n} old snapshot(s)"),
-            Err(e) => tracing::error!("Failed to purge old snapshots: {e}"),
-        }
     }
 }

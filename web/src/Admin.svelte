@@ -19,7 +19,6 @@
   let discordBotToken = $state("");
   let discordAdminIds = $state("");
   let discordEnabled = $state(false);
-  let trackingRetentionDays = $state(90);
   let notificationMode = $state("every_update");
   let anomalyLookbackDays = $state(14);
   let anomalySensitivityUp = $state(2.0);
@@ -124,7 +123,6 @@
       discordBotToken = "";
       discordAdminIds = data.discord_admin_ids || "";
       discordEnabled = data.discord_enabled || false;
-      trackingRetentionDays = data.tracking_retention_days || 90;
       notificationMode = data.notification_mode || "every_update";
       anomalyLookbackDays = data.anomaly_lookback_days ?? 14;
       anomalySensitivityUp = data.anomaly_sensitivity_up ?? 2.0;
@@ -149,7 +147,6 @@
         telegram_enabled: telegramEnabled,
         discord_admin_ids: discordAdminIds,
         discord_enabled: discordEnabled,
-        tracking_retention_days: trackingRetentionDays,
         notification_mode: notificationMode,
         anomaly_lookback_days: anomalyLookbackDays,
         anomaly_sensitivity_up: anomalySensitivityUp,
@@ -277,25 +274,6 @@
               </ol>
               <p class="api-key-why">This key is used to retrieve wishlist data via the <code>IPartnerFinancialsService/GetAppWishlistReporting</code> partner API endpoint.</p>
             </div>
-          </div>
-
-          <h2 class="mt">Data Retention</h2>
-          <p class="section-desc">
-            How long to keep tracking snapshots before automatic cleanup.
-          </p>
-
-          <div class="form-group">
-            <label for="retention-days">Retention Period (days)</label>
-            <input
-              id="retention-days"
-              type="number"
-              min="1"
-              bind:value={trackingRetentionDays}
-              disabled={saving}
-            />
-            <span class="form-hint"
-              >Snapshots older than this will be automatically purged</span
-            >
           </div>
 
           <button type="submit" class="save-btn" disabled={saving}>

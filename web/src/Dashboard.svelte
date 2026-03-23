@@ -159,32 +159,51 @@
           </div>
           <div
             class="stat-net"
-            class:positive={game.adds - game.deletes >= 0}
-            class:negative={game.adds - game.deletes < 0}
+            class:positive={game.total_adds - game.total_deletes > 0}
+            class:negative={game.total_adds - game.total_deletes < 0}
           >
             <span class="net-value"
-              >{game.adds - game.deletes >= 0 ? "+" : ""}{(
-                game.adds - game.deletes
-              ).toLocaleString()}</span
+              >{(game.total_adds - game.total_deletes).toLocaleString()}</span
             >
-            <span class="net-label">Net Wishlists</span>
+            <span class="net-label">Net Wishlists (Lifetime)</span>
           </div>
+          <div class="stats-section-label">Lifetime</div>
           <div class="stats">
             <div class="stat stat-adds">
-              <span class="stat-value">{game.adds.toLocaleString()}</span>
               <span class="stat-label">Adds</span>
+              <span class="stat-value">{game.total_adds.toLocaleString()}</span>
             </div>
             <div class="stat stat-deletes">
-              <span class="stat-value">{game.deletes.toLocaleString()}</span>
               <span class="stat-label">Deletes</span>
+              <span class="stat-value">{game.total_deletes.toLocaleString()}</span>
             </div>
             <div class="stat stat-purchases">
-              <span class="stat-value">{game.purchases.toLocaleString()}</span>
               <span class="stat-label">Purchases</span>
+              <span class="stat-value">{game.total_purchases.toLocaleString()}</span>
             </div>
             <div class="stat stat-gifts">
-              <span class="stat-value">{game.gifts.toLocaleString()}</span>
               <span class="stat-label">Gifts</span>
+              <span class="stat-value">{game.total_gifts.toLocaleString()}</span>
+            </div>
+          </div>
+          <div class="section-divider"></div>
+          <div class="stats-section-label">Today</div>
+          <div class="stats">
+            <div class="stat stat-adds">
+              <span class="stat-label">Adds</span>
+              <span class="stat-value">{game.adds.toLocaleString()}</span>
+            </div>
+            <div class="stat stat-deletes">
+              <span class="stat-label">Deletes</span>
+              <span class="stat-value">{game.deletes.toLocaleString()}</span>
+            </div>
+            <div class="stat stat-purchases">
+              <span class="stat-label">Purchases</span>
+              <span class="stat-value">{game.purchases.toLocaleString()}</span>
+            </div>
+            <div class="stat stat-gifts">
+              <span class="stat-label">Gifts</span>
+              <span class="stat-value">{game.gifts.toLocaleString()}</span>
             </div>
           </div>
         </div>
@@ -264,19 +283,19 @@
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 0.75rem;
-    overflow: hidden;
     transition:
       border-color 0.2s,
       transform 0.2s;
     width: 100%;
-    max-width: 400px;
-    min-width: 280px;
-    flex: 1 1 280px;
+    max-width: 420px;
+    min-width: 300px;
+    flex: 1 1 300px;
   }
 
-  @media (max-width: 600px) {
+  @media (max-width: 640px) {
     .card {
       min-width: 0;
+      max-width: none;
       flex: 1 1 100%;
     }
   }
@@ -302,10 +321,11 @@
     width: 100%;
     height: auto;
     display: block;
+    border-radius: 0.75rem 0.75rem 0 0;
   }
 
   .card-body {
-    padding: 1.25rem;
+    padding: 1rem 1.25rem 1.25rem;
   }
 
   .card.clickable {
@@ -355,31 +375,32 @@
 
   .stats {
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(2, 1fr);
     gap: 0.5rem;
   }
 
   .stat {
-    text-align: center;
-    padding: 0.5rem 0.25rem;
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    padding: 0.45rem 0.65rem;
     border-radius: 0.5rem;
     background: rgba(255, 255, 255, 0.03);
   }
 
   .stat-value {
-    display: block;
-    font-size: 1.1rem;
+    font-size: 1.05rem;
     font-weight: 700;
     font-variant-numeric: tabular-nums;
+    white-space: nowrap;
   }
 
   .stat-label {
-    display: block;
     font-size: 0.7rem;
     color: var(--text-muted);
-    margin-top: 0.2rem;
     text-transform: uppercase;
     letter-spacing: 0.05em;
+    margin-right: 0.4rem;
   }
 
   .stat-adds .stat-value {
@@ -397,7 +418,7 @@
 
   .stat-net {
     text-align: center;
-    padding: 0.5rem;
+    padding: 0.65rem 0.75rem;
     margin-bottom: 0.75rem;
     border-radius: 0.5rem;
     background: rgba(255, 255, 255, 0.03);
@@ -423,5 +444,18 @@
   }
   .stat-net.negative .net-value {
     color: var(--red);
+  }
+
+  .section-divider {
+    border-top: 1px solid var(--border);
+    margin: 0.75rem 0 0.5rem;
+  }
+
+  .stats-section-label {
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 0.4rem;
   }
 </style>

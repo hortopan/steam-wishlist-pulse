@@ -94,7 +94,13 @@ const RATE_LIMIT_WINDOW_SECS: u64 = 300; // 5 minutes
 
 type RateLimiter = Arc<tokio::sync::Mutex<HashMap<String, Vec<Instant>>>>;
 
-fn check_rate_limit(attempts: &mut HashMap<String, Vec<Instant>>, key: &str) -> Result<(), u64> {
+/// Check the rate limit and, if under the limit, **preemptively record** the
+/// attempt in one atomic operation (single lock hold). On successful login the
+/// caller must call `clear_attempts` to remove the preemptive record.
+fn check_and_record_attempt(
+    attempts: &mut HashMap<String, Vec<Instant>>,
+    key: &str,
+) -> Result<(), u64> {
     let now = Instant::now();
     let window = std::time::Duration::from_secs(RATE_LIMIT_WINDOW_SECS);
 
@@ -108,17 +114,13 @@ fn check_rate_limit(attempts: &mut HashMap<String, Vec<Instant>>, key: &str) -> 
 
     if entry.len() >= MAX_LOGIN_ATTEMPTS {
         let oldest = entry[0];
-        let retry_after = window.as_secs() - now.duration_since(oldest).as_secs();
+        let retry_after = window.as_secs().saturating_sub(now.duration_since(oldest).as_secs());
         return Err(retry_after);
     }
-    Ok(())
-}
 
-fn record_failed_attempt(attempts: &mut HashMap<String, Vec<Instant>>, key: &str) {
-    attempts
-        .entry(key.to_string())
-        .or_default()
-        .push(Instant::now());
+    // Record attempt preemptively — cleared on success
+    entry.push(now);
+    Ok(())
 }
 
 fn clear_attempts(attempts: &mut HashMap<String, Vec<Instant>>, key: &str) {
@@ -126,9 +128,6 @@ fn clear_attempts(attempts: &mut HashMap<String, Vec<Instant>>, key: &str) {
 }
 
 // ── Shared application state ────────────────────────────────────────
-
-const CONFIG_TRACKING_RETENTION_DAYS: &str = "tracking_retention_days";
-const DEFAULT_RETENTION_DAYS: u32 = 90;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -139,13 +138,14 @@ pub struct AppState {
     login_attempts: RateLimiter,
     cached_jwt_secret: Arc<tokio::sync::Mutex<Option<String>>>,
     insecure: bool,
-    pub auto_populate_days: u32,
     latest_version: Arc<tokio::sync::Mutex<Option<(String, Instant)>>>,
     encryption_secret: Option<SecretString>,
+    backfill_tokens: Arc<tokio::sync::Mutex<HashMap<u32, tokio_util::sync::CancellationToken>>>,
+    pub backfill_rate: f64,
 }
 
 impl AppState {
-    pub fn new(db: Database, steam: Option<SteamClient>, insecure: bool, auto_populate_days: u32, encryption_secret: Option<SecretString>) -> Self {
+    pub fn new(db: Database, steam: Option<SteamClient>, insecure: bool, encryption_secret: Option<SecretString>, backfill_rate: f64) -> Self {
         if insecure {
             tracing::warn!("Running with --insecure: cookies will not require HTTPS");
         }
@@ -157,9 +157,10 @@ impl AppState {
             login_attempts: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             cached_jwt_secret: Arc::new(tokio::sync::Mutex::new(None)),
             insecure,
-            auto_populate_days,
             latest_version: Arc::new(tokio::sync::Mutex::new(None)),
             encryption_secret,
+            backfill_tokens: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            backfill_rate,
         }
     }
 
@@ -183,14 +184,28 @@ impl AppState {
         self.encryption_secret.is_some()
     }
 
-    pub async fn get_retention_days(&self) -> u32 {
-        self.db
-            .get_config(CONFIG_TRACKING_RETENTION_DAYS)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(DEFAULT_RETENTION_DAYS)
+    /// Create a cancellation token for a backfill task and store it.
+    /// If a backfill is already running for this app, it is cancelled first.
+    pub async fn start_backfill(&self, app_id: u32) -> tokio_util::sync::CancellationToken {
+        let token = tokio_util::sync::CancellationToken::new();
+        let mut tokens = self.backfill_tokens.lock().await;
+        if let Some(old) = tokens.remove(&app_id) {
+            old.cancel();
+        }
+        tokens.insert(app_id, token.clone());
+        token
+    }
+
+    /// Cancel an in-progress backfill for a game.
+    pub async fn cancel_backfill(&self, app_id: u32) {
+        if let Some(token) = self.backfill_tokens.lock().await.remove(&app_id) {
+            token.cancel();
+        }
+    }
+
+    /// Remove a backfill token when backfill completes naturally.
+    pub async fn finish_backfill(&self, app_id: u32) {
+        self.backfill_tokens.lock().await.remove(&app_id);
     }
 
     pub async fn get_notification_mode(&self) -> String {
@@ -323,17 +338,20 @@ impl AppState {
     }
 
     /// Get or create the JWT signing secret (cached to avoid DB hits on every request).
+    /// The secret is stored encrypted in the DB when encryption is enabled.
     async fn jwt_secret(&self) -> String {
         let mut cached = self.cached_jwt_secret.lock().await;
         if let Some(ref secret) = *cached {
             return secret.clone();
         }
-        if let Ok(Some(secret)) = self.db.get_config(CONFIG_JWT_SECRET).await {
+        if let Ok(Some(stored)) = self.db.get_config(CONFIG_JWT_SECRET).await {
+            let secret = self.decrypt_value(&stored).unwrap_or(stored);
             *cached = Some(secret.clone());
             return secret;
         }
         let secret = generate_jwt_secret();
-        let _ = self.db.set_config(CONFIG_JWT_SECRET, &secret).await;
+        let store_value = self.encrypt_value(&secret).unwrap_or_else(|_| secret.clone());
+        let _ = self.db.set_config(CONFIG_JWT_SECRET, &store_value).await;
         *cached = Some(secret.clone());
         secret
     }
@@ -341,7 +359,8 @@ impl AppState {
     /// Rotate the JWT secret, invalidating all existing tokens.
     async fn rotate_jwt_secret(&self) {
         let secret = generate_jwt_secret();
-        let _ = self.db.set_config(CONFIG_JWT_SECRET, &secret).await;
+        let store_value = self.encrypt_value(&secret).unwrap_or_else(|_| secret.clone());
+        let _ = self.db.set_config(CONFIG_JWT_SECRET, &store_value).await;
         *self.cached_jwt_secret.lock().await = Some(secret);
     }
 
@@ -422,7 +441,7 @@ impl AppState {
         let mut guard = self.steam.write().await;
         match *guard {
             Some(ref client) => client.set_api_key(key.to_string()).await,
-            None => *guard = Some(SteamClient::new(key.to_string())),
+            None => *guard = Some(SteamClient::new(key.to_string(), self.backfill_rate)),
         }
     }
 
@@ -637,6 +656,10 @@ struct GameReport {
     adds_linux: i64,
     countries: Vec<crate::steam::CountryReport>,
     changed_at: Option<String>,
+    total_adds: i64,
+    total_deletes: i64,
+    total_purchases: i64,
+    total_gifts: i64,
 }
 
 #[derive(Serialize)]
@@ -644,8 +667,55 @@ struct ApiResponse {
     games: Vec<GameReport>,
 }
 
+// ── API response types ──────────────────────────────────────────────
+
+#[derive(Serialize, Default, Clone)]
+struct AnomalyMetrics {
+    adds: bool,
+    deletes: bool,
+    purchases: bool,
+    gifts: bool,
+    /// Human-readable descriptions for each anomalous metric.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    descriptions: Vec<String>,
+}
+
+/// Lightweight game detail (metadata + latest snapshot only, no history).
 #[derive(Serialize)]
-struct SnapshotEntry {
+struct GameDetailResponse {
+    app_id: u32,
+    name: String,
+    image_url: String,
+    latest: Option<GameReport>,
+    total_snapshots: usize,
+}
+
+/// A single aggregated chart data point.
+#[derive(Serialize)]
+struct ChartPointResponse {
+    label: String,
+    adds: i64,
+    deletes: i64,
+    purchases: i64,
+    gifts: i64,
+    adds_windows: i64,
+    adds_mac: i64,
+    adds_linux: i64,
+    is_anomaly: bool,
+    anomaly_metrics: AnomalyMetrics,
+}
+
+/// Chart data response with resolution metadata.
+#[derive(Serialize)]
+struct ChartResponse {
+    resolution: String,
+    points: Vec<ChartPointResponse>,
+}
+
+/// A history entry without countries (lightweight).
+#[derive(Serialize)]
+struct HistoryEntry {
+    snapshot_id: i64,
     date: String,
     adds: i64,
     deletes: i64,
@@ -654,29 +724,25 @@ struct SnapshotEntry {
     adds_windows: i64,
     adds_mac: i64,
     adds_linux: i64,
-    countries: Vec<crate::steam::CountryReport>,
     fetched_at: String,
-    /// Whether this snapshot represents an anomalous change from the previous one (any metric).
     is_anomaly: bool,
-    /// Per-metric anomaly flags so the UI can highlight only the affected metrics.
     anomaly_metrics: AnomalyMetrics,
 }
 
-#[derive(Serialize, Default)]
-struct AnomalyMetrics {
-    adds: bool,
-    deletes: bool,
-    purchases: bool,
-    gifts: bool,
+/// Paginated history response.
+#[derive(Serialize)]
+struct PaginatedHistoryResponse {
+    entries: Vec<HistoryEntry>,
+    total: usize,
+    page: usize,
+    per_page: usize,
 }
 
+/// Country data for a single snapshot.
 #[derive(Serialize)]
-struct GameDetailResponse {
-    app_id: u32,
-    name: String,
-    image_url: String,
-    latest: Option<GameReport>,
-    history: Vec<SnapshotEntry>,
+struct SnapshotCountriesResponse {
+    snapshot_id: i64,
+    countries: Vec<crate::steam::CountryReport>,
 }
 
 #[derive(Deserialize)]
@@ -688,7 +754,6 @@ struct AdminConfigUpdate {
     discord_bot_token: Option<String>,
     discord_admin_ids: Option<String>,
     discord_enabled: Option<bool>,
-    tracking_retention_days: Option<u32>,
     notification_mode: Option<String>,
     anomaly_lookback_days: Option<u32>,
     anomaly_sensitivity_up: Option<f64>,
@@ -707,7 +772,6 @@ struct AdminConfigResponse {
     telegram_enabled: bool,
     discord_admin_ids: Option<String>,
     discord_enabled: bool,
-    tracking_retention_days: u32,
     notification_mode: String,
     anomaly_lookback_days: u32,
     anomaly_sensitivity_up: f64,
@@ -828,10 +892,10 @@ async fn api_login(
 ) -> (CookieJar, Json<LoginResponse>) {
     let ip = addr.ip().to_string();
 
-    // Check rate limit
+    // Check rate limit and preemptively record the attempt (single lock hold)
     {
         let mut attempts = state.login_attempts.lock().await;
-        if let Err(retry_after) = check_rate_limit(&mut attempts, &ip) {
+        if let Err(retry_after) = check_and_record_attempt(&mut attempts, &ip) {
             return (
                 jar,
                 Json(LoginResponse {
@@ -904,8 +968,7 @@ async fn api_login(
         );
     }
 
-    // Record failed attempt
-    record_failed_attempt(&mut *state.login_attempts.lock().await, &ip);
+    // Attempt was already recorded preemptively by check_and_record_attempt
 
     (
         jar,
@@ -1026,6 +1089,7 @@ async fn api_wishlist(State(state): State<AppState>, jar: CookieJar) -> Response
     // Read latest data from DB snapshots (populated by background polling)
     let snapshots = state.db.get_latest_snapshots().await.unwrap_or_default();
     let app_info = state.db.get_all_app_info().await.unwrap_or_default();
+    let totals = state.db.get_all_game_totals().await.unwrap_or_default();
 
     let games = snapshots
         .into_iter()
@@ -1042,6 +1106,7 @@ async fn api_wishlist(State(state): State<AppState>, jar: CookieJar) -> Response
             } else {
                 format!("{}T00:00:00Z", report.date)
             };
+            let game_totals = totals.get(&report.app_id);
             GameReport {
                 app_id: report.app_id,
                 image_url,
@@ -1056,6 +1121,10 @@ async fn api_wishlist(State(state): State<AppState>, jar: CookieJar) -> Response
                 adds_linux: report.adds_linux,
                 countries: report.countries,
                 changed_at: report.fetched_at,
+                total_adds: game_totals.map_or(0, |t| t.adds),
+                total_deletes: game_totals.map_or(0, |t| t.deletes),
+                total_purchases: game_totals.map_or(0, |t| t.purchases),
+                total_gifts: game_totals.map_or(0, |t| t.gifts),
             }
         })
         .collect();
@@ -1063,6 +1132,9 @@ async fn api_wishlist(State(state): State<AppState>, jar: CookieJar) -> Response
     Json(ApiResponse { games }).into_response()
 }
 
+// ── Game detail endpoints (split for scalability) ───────────────────
+
+/// GET /api/wishlist/{app_id}/detail — metadata + latest snapshot only
 async fn api_game_detail(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -1071,10 +1143,7 @@ async fn api_game_detail(
     if state.get_session(&jar).await.is_none() {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-
-    // Check the game is tracked
-    let is_tracked = state.db.is_tracked(app_id).await.unwrap_or(false);
-    if !is_tracked {
+    if !state.db.is_tracked(app_id).await.unwrap_or(false) {
         return StatusCode::NOT_FOUND.into_response();
     }
 
@@ -1084,11 +1153,7 @@ async fn api_game_detail(
         None => (format!("App {}", app_id), String::new()),
     };
 
-    let snapshots = state
-        .db
-        .get_snapshots_for_game(app_id)
-        .await
-        .unwrap_or_default();
+    let game_totals = state.db.get_game_totals(app_id).await.unwrap_or(None);
 
     let latest = state
         .db
@@ -1118,92 +1183,316 @@ async fn api_game_detail(
                 adds_linux: report.adds_linux,
                 countries: report.countries,
                 changed_at: report.fetched_at,
+                total_adds: game_totals.as_ref().map_or(0, |t| t.adds),
+                total_deletes: game_totals.as_ref().map_or(0, |t| t.deletes),
+                total_purchases: game_totals.as_ref().map_or(0, |t| t.purchases),
+                total_gifts: game_totals.as_ref().map_or(0, |t| t.gifts),
             }
         });
 
-    // Compute anomaly flags for each snapshot in the history.
-    // Uses the same robust median+MAD approach as real-time detection (anomaly.rs),
-    // with timestamp-based lookback window and time-normalized rates (per day).
+    // Get total count efficiently
+    let total_snapshots = state
+        .db
+        .get_snapshots_paginated(app_id, 1, 0)
+        .await
+        .map(|p| p.total)
+        .unwrap_or(0);
+
+    Json(GameDetailResponse {
+        app_id,
+        name,
+        image_url,
+        latest,
+        total_snapshots,
+    })
+    .into_response()
+}
+
+#[derive(Deserialize)]
+struct ChartQuery {
+    range: Option<String>,
+}
+
+/// GET /api/wishlist/{app_id}/chart?range=7d|1m|3m|1y|5y
+async fn api_game_chart(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    axum::extract::Path(app_id): axum::extract::Path<u32>,
+    axum::extract::Query(query): axum::extract::Query<ChartQuery>,
+) -> Response {
+    if state.get_session(&jar).await.is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if !state.db.is_tracked(app_id).await.unwrap_or(false) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    let range = query.range.as_deref().unwrap_or("7d");
+
+    // Calculate the "since" timestamp and pick resolution
+    let now = chrono::Utc::now();
+    let (since, resolution) = match range {
+        "1d" => {
+            let since = now - chrono::Duration::days(1);
+            (since, "raw")
+        }
+        "2d" => {
+            let since = now - chrono::Duration::days(2);
+            (since, "raw")
+        }
+        "3d" => {
+            let since = now - chrono::Duration::days(3);
+            (since, "raw")
+        }
+        "7d" => {
+            let since = now - chrono::Duration::days(7);
+            (since, "daily")
+        }
+        "1m" => {
+            let since = now - chrono::Duration::days(30);
+            (since, "daily")
+        }
+        "3m" => {
+            let since = now - chrono::Duration::days(90);
+            (since, "daily")
+        }
+        "1y" => {
+            let since = now - chrono::Duration::days(365);
+            (since, "weekly")
+        }
+        "5y" => {
+            let since = now - chrono::Duration::days(5 * 365);
+            (since, "monthly")
+        }
+        _ => {
+            let since = now - chrono::Duration::days(7);
+            (since, "daily")
+        }
+    };
+
+    let since_str = since.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let now_str = now.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+
+    let chart_points = state
+        .db
+        .get_chart_data(app_id, &since_str, resolution)
+        .await
+        .unwrap_or_default();
+
     let anomaly_config = state.get_anomaly_config().await;
-    let lookback_secs = anomaly_config.lookback_days as f64 * 86400.0;
 
-    let history: Vec<SnapshotEntry> = snapshots
-        .iter()
-        .enumerate()
-        .map(|(i, s)| {
-            let anomaly_metrics = if i == 0 {
-                AnomalyMetrics::default()
-            } else {
-                let prev = &snapshots[i - 1];
+    let anomaly_by_bucket: std::collections::HashMap<String, AnomalyMetrics> = if resolution == "raw" {
+        // For raw resolution, compute anomalies on individual raw snapshots (original behavior)
+        let lookback_secs = anomaly_config.lookback_days as i64 * 86400;
+        let lookback_since = (since - chrono::Duration::seconds(lookback_secs))
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
 
-                // Find lookback window start using actual timestamps
-                let curr_ts = s.fetched_at.as_deref().unwrap_or("");
-                let lookback_start = (0..i).rfind(|&j| {
-                    let ts = snapshots[j].fetched_at.as_deref().unwrap_or("");
-                    crate::db::elapsed_days(ts, curr_ts) * 86400.0 > lookback_secs
-                }).map(|j| j + 1).unwrap_or(0);
+        let raw_snapshots = state
+            .db
+            .get_raw_snapshots_between(app_id, &lookback_since, &now_str)
+            .await
+            .unwrap_or_default();
 
-                let window = &snapshots[lookback_start..i];
-                // Need at least 4 snapshots to get 3 rate pairs (matching anomaly.rs min 3 data points)
-                if window.len() < 4 {
-                    AnomalyMetrics::default()
-                } else {
-                    // Compute days elapsed between current and previous snapshot
-                    let prev_ts = prev.fetched_at.as_deref().unwrap_or("");
-                    let days_elapsed = crate::db::elapsed_days(prev_ts, curr_ts);
-                    let days_elapsed = if days_elapsed <= 0.0 { 1.0 } else { days_elapsed };
+        let context_with_secs: Vec<(f64, &crate::db::ChartPoint)> = raw_snapshots
+            .iter()
+            .map(|p| (crate::db::elapsed_days("1970-01-01T00:00:00Z", &p.label) * 86400.0, p))
+            .collect();
 
-                    let check_metric = |curr_val: i64, prev_val: i64, get_vals: &dyn Fn(&crate::steam::WishlistReport) -> i64| -> bool {
-                        let raw_delta = curr_val - prev_val;
-                        if raw_delta == 0 {
-                            return false;
-                        }
-                        if raw_delta.abs() < anomaly_config.min_absolute {
-                            return false;
-                        }
-                        let current_rate = raw_delta as f64 / days_elapsed;
+        let raw_anomalies: Vec<(&crate::db::ChartPoint, AnomalyMetrics)> = raw_snapshots
+            .iter()
+            .map(|p| {
+                let metrics = compute_anomaly_for_chart_point(
+                    p,
+                    &context_with_secs,
+                    &anomaly_config,
+                    lookback_secs as f64,
+                );
+                (p, metrics)
+            })
+            .collect();
 
-                        // Compute historical rates from the lookback window
-                        let mut rates: Vec<f64> = window.windows(2)
-                            .filter_map(|w| {
-                                let t0 = w[0].fetched_at.as_deref().unwrap_or("");
-                                let t1 = w[1].fetched_at.as_deref().unwrap_or("");
-                                let d = crate::db::elapsed_days(t0, t1);
-                                if d <= 0.0 { return None; }
-                                let raw = get_vals(&w[1]) as i64 - get_vals(&w[0]) as i64;
-                                Some(raw as f64 / d)
-                            })
-                            .collect();
-                        if rates.len() < 3 {
-                            return false;
-                        }
-                        // Use median + MAD (consistent with anomaly.rs)
-                        let median = crate::anomaly::f64_median_pub(&mut rates);
-                        let mad = crate::anomaly::f64_mad_pub(&mut rates, median);
-                        let effective_mad = crate::anomaly::apply_mad_floor_pub(mad, median, anomaly_config.mad_floor_pct);
-                        if effective_mad == 0.0 {
-                            (current_rate - median).abs() > f64::EPSILON
-                        } else {
-                            let deviation = current_rate - median;
-                            let z = deviation.abs() / effective_mad;
-                            if deviation >= 0.0 {
-                                z > anomaly_config.sensitivity_up
-                            } else {
-                                z > anomaly_config.sensitivity_down
-                            }
-                        }
-                    };
-                    AnomalyMetrics {
-                        adds: check_metric(s.adds, prev.adds, &|r| r.adds),
-                        deletes: check_metric(s.deletes, prev.deletes, &|r| r.deletes),
-                        purchases: check_metric(s.purchases, prev.purchases, &|r| r.purchases),
-                        gifts: check_metric(s.gifts, prev.gifts, &|r| r.gifts),
-                    }
+        let mut map: std::collections::HashMap<String, AnomalyMetrics> =
+            std::collections::HashMap::new();
+        for (p, metrics) in &raw_anomalies {
+            let entry = map
+                .entry(p.label.clone())
+                .or_insert_with(AnomalyMetrics::default);
+            entry.adds = entry.adds || metrics.adds;
+            entry.deletes = entry.deletes || metrics.deletes;
+            entry.purchases = entry.purchases || metrics.purchases;
+            entry.gifts = entry.gifts || metrics.gifts;
+            for desc in &metrics.descriptions {
+                if !entry.descriptions.contains(desc) {
+                    entry.descriptions.push(desc.clone());
                 }
-            };
-            let is_anomaly = anomaly_metrics.adds || anomaly_metrics.deletes || anomaly_metrics.purchases || anomaly_metrics.gifts;
+            }
+        }
+        map
+    } else {
+        // For aggregated resolutions, compute anomalies directly on aggregated chart points.
+        // Scale lookback so lookback_days means "number of context data points" at this resolution.
+        let secs_per_period: i64 = match resolution {
+            "weekly" => 7 * 86400,
+            "monthly" => 30 * 86400,
+            _ => 86400, // daily
+        };
+        let lookback_secs = anomaly_config.lookback_days as i64 * secs_per_period;
+        let lookback_since = (since - chrono::Duration::seconds(lookback_secs))
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
 
-            SnapshotEntry {
+        // Fetch aggregated points with extended lookback for context
+        let context_points = state
+            .db
+            .get_chart_data(app_id, &lookback_since, resolution)
+            .await
+            .unwrap_or_default();
+
+        let context_with_secs: Vec<(f64, &crate::db::ChartPoint)> = context_points
+            .iter()
+            .map(|p| (crate::db::elapsed_days("1970-01-01T00:00:00Z", &p.label) * 86400.0, p))
+            .collect();
+
+        let mut map: std::collections::HashMap<String, AnomalyMetrics> =
+            std::collections::HashMap::new();
+        for p in &chart_points {
+            let metrics = compute_anomaly_for_chart_point(
+                p,
+                &context_with_secs,
+                &anomaly_config,
+                lookback_secs as f64,
+            );
+            map.insert(p.label.clone(), metrics);
+        }
+        map
+    };
+
+    let points = chart_points
+        .into_iter()
+        .map(|p| {
+            let anomaly = anomaly_by_bucket
+                .get(&p.label)
+                .cloned()
+                .unwrap_or_default();
+            let is_anomaly =
+                anomaly.adds || anomaly.deletes || anomaly.purchases || anomaly.gifts;
+            ChartPointResponse {
+                label: p.label,
+                adds: p.adds,
+                deletes: p.deletes,
+                purchases: p.purchases,
+                gifts: p.gifts,
+                adds_windows: p.adds_windows,
+                adds_mac: p.adds_mac,
+                adds_linux: p.adds_linux,
+                is_anomaly,
+                anomaly_metrics: anomaly,
+            }
+        })
+        .collect();
+
+    Json(ChartResponse {
+        resolution: resolution.to_string(),
+        points,
+    })
+    .into_response()
+}
+
+#[derive(Deserialize)]
+struct HistoryQuery {
+    page: Option<usize>,
+    per_page: Option<usize>,
+}
+
+/// GET /api/wishlist/{app_id}/history?page=1&per_page=24
+async fn api_game_history(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    axum::extract::Path(app_id): axum::extract::Path<u32>,
+    axum::extract::Query(query): axum::extract::Query<HistoryQuery>,
+) -> Response {
+    if state.get_session(&jar).await.is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if !state.db.is_tracked(app_id).await.unwrap_or(false) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    let page = query.page.unwrap_or(1).max(1);
+    let per_page = query.per_page.unwrap_or(24).clamp(1, 100);
+
+    let paginated = state
+        .db
+        .get_snapshots_paginated(app_id, page, per_page)
+        .await
+        .unwrap_or(crate::db::PaginatedSnapshots {
+            snapshots: Vec::new(),
+            total: 0,
+        });
+
+    // Compute anomaly flags for each snapshot in this page.
+    // We fetch a bounded lookback window of raw data around this page only.
+    let anomaly_config = state.get_anomaly_config().await;
+    let lookback_secs = anomaly_config.lookback_days as i64 * 86400;
+
+    // Page is ordered newest-first: first() = newest, last() = oldest
+    let newest_in_page = paginated
+        .snapshots
+        .first()
+        .and_then(|(_, r)| r.fetched_at.clone());
+    let oldest_in_page = paginated
+        .snapshots
+        .last()
+        .and_then(|(_, r)| r.fetched_at.clone());
+
+    let parse_ts = |s: &str| {
+        chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%SZ")
+            .or_else(|_| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S"))
+            .ok()
+    };
+
+    // Fetch bounded context: from (oldest - lookback) to newest
+    let context_snapshots = match (&oldest_in_page, &newest_in_page) {
+        (Some(oldest_ts), Some(newest_ts)) => {
+            if let Some(oldest_dt) = parse_ts(oldest_ts) {
+                let lookback_start = oldest_dt - chrono::Duration::seconds(lookback_secs);
+                let since_str = lookback_start.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+                state
+                    .db
+                    .get_raw_snapshots_between(app_id, &since_str, newest_ts)
+                    .await
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            }
+        }
+        _ => Vec::new(),
+    };
+
+    // Pre-parse all context timestamps once to avoid repeated chrono parsing
+    let context_with_secs: Vec<(f64, &crate::db::ChartPoint)> = context_snapshots
+        .iter()
+        .map(|p| (crate::db::elapsed_days("1970-01-01T00:00:00Z", &p.label) * 86400.0, p))
+        .collect();
+
+    let entries: Vec<HistoryEntry> = paginated
+        .snapshots
+        .iter()
+        .map(|(snapshot_id, s)| {
+            let anomaly_metrics = compute_anomaly_for_snapshot(
+                s,
+                &context_with_secs,
+                &anomaly_config,
+                lookback_secs as f64,
+            );
+            let is_anomaly = anomaly_metrics.adds
+                || anomaly_metrics.deletes
+                || anomaly_metrics.purchases
+                || anomaly_metrics.gifts;
+
+            HistoryEntry {
+                snapshot_id: *snapshot_id,
                 date: if s.date.contains('T') {
                     s.date.clone()
                 } else {
@@ -1216,7 +1505,6 @@ async fn api_game_detail(
                 adds_windows: s.adds_windows,
                 adds_mac: s.adds_mac,
                 adds_linux: s.adds_linux,
-                countries: s.countries.clone(),
                 fetched_at: s.fetched_at.clone().unwrap_or_default(),
                 is_anomaly,
                 anomaly_metrics,
@@ -1224,12 +1512,219 @@ async fn api_game_detail(
         })
         .collect();
 
-    Json(GameDetailResponse {
-        app_id,
-        name,
-        image_url,
-        latest,
-        history,
+    Json(PaginatedHistoryResponse {
+        entries,
+        total: paginated.total,
+        page,
+        per_page,
+    })
+    .into_response()
+}
+
+/// Compute anomaly flags for a single snapshot given pre-parsed context data.
+/// `context` is a slice of (epoch_secs, ChartPoint) pairs, sorted by time ascending.
+fn compute_anomaly_for_snapshot(
+    snapshot: &crate::steam::WishlistReport,
+    context: &[(f64, &crate::db::ChartPoint)],
+    config: &crate::anomaly::AnomalyConfig,
+    lookback_secs: f64,
+) -> AnomalyMetrics {
+    let curr_ts = snapshot.fetched_at.as_deref().unwrap_or("");
+    if curr_ts.is_empty() {
+        return AnomalyMetrics::default();
+    }
+    let curr_secs = crate::db::elapsed_days("1970-01-01T00:00:00Z", curr_ts) * 86400.0;
+    compute_anomaly_inner(
+        curr_secs,
+        snapshot.adds,
+        snapshot.deletes,
+        snapshot.purchases,
+        snapshot.gifts,
+        context,
+        config,
+        lookback_secs,
+    )
+}
+
+/// Compute anomaly flags for a raw ChartPoint (used by the chart endpoint).
+fn compute_anomaly_for_chart_point(
+    point: &crate::db::ChartPoint,
+    context: &[(f64, &crate::db::ChartPoint)],
+    config: &crate::anomaly::AnomalyConfig,
+    lookback_secs: f64,
+) -> AnomalyMetrics {
+    let curr_secs = crate::db::elapsed_days("1970-01-01T00:00:00Z", &point.label) * 86400.0;
+    compute_anomaly_inner(
+        curr_secs,
+        point.adds,
+        point.deletes,
+        point.purchases,
+        point.gifts,
+        context,
+        config,
+        lookback_secs,
+    )
+}
+
+/// Shared anomaly detection logic.
+fn compute_anomaly_inner(
+    curr_secs: f64,
+    adds: i64,
+    deletes: i64,
+    purchases: i64,
+    gifts: i64,
+    context: &[(f64, &crate::db::ChartPoint)],
+    config: &crate::anomaly::AnomalyConfig,
+    lookback_secs: f64,
+) -> AnomalyMetrics {
+    if context.len() < 4 {
+        return AnomalyMetrics::default();
+    }
+
+    // Find the previous snapshot (the one just before this one in time)
+    let prev_idx = context
+        .iter()
+        .rposition(|(s, _)| *s < curr_secs);
+
+    let prev_idx = match prev_idx {
+        Some(i) => i,
+        None => return AnomalyMetrics::default(),
+    };
+    let (prev_secs, prev) = context[prev_idx];
+
+    // Find lookback window: points from (curr - lookback) up to (but not including) curr
+    let window_start_secs = curr_secs - lookback_secs;
+    let window: Vec<(f64, &crate::db::ChartPoint)> = context
+        .iter()
+        .filter(|(s, _)| *s >= window_start_secs && *s < curr_secs)
+        .copied()
+        .collect();
+
+    if window.len() < 4 {
+        return AnomalyMetrics::default();
+    }
+
+    let days_elapsed = (curr_secs - prev_secs) / 86400.0;
+    let days_elapsed = if days_elapsed <= 0.0 { 1.0 } else { days_elapsed };
+
+    let check_metric =
+        |name: &str, curr_val: i64, prev_val: i64, get_val: &dyn Fn(&crate::db::ChartPoint) -> i64| -> (bool, Option<String>) {
+            let raw_delta = curr_val - prev_val;
+            if raw_delta == 0 {
+                return (false, None);
+            }
+            if raw_delta.abs() < config.min_absolute {
+                return (false, None);
+            }
+            let current_rate = raw_delta as f64 / days_elapsed;
+
+            let mut rates: Vec<f64> = window
+                .windows(2)
+                .filter_map(|w| {
+                    let d = (w[1].0 - w[0].0) / 86400.0;
+                    if d <= 0.0 {
+                        return None;
+                    }
+                    let raw = get_val(w[1].1) - get_val(w[0].1);
+                    Some(raw as f64 / d)
+                })
+                .collect();
+            if rates.len() < 3 {
+                return (false, None);
+            }
+            let median = crate::anomaly::f64_median_pub(&mut rates);
+            let mad = crate::anomaly::f64_mad_pub(&mut rates, median);
+            let effective_mad =
+                crate::anomaly::apply_mad_floor_pub(mad, median, config.mad_floor_pct);
+            let is_anomalous = if effective_mad == 0.0 {
+                (current_rate - median).abs() > f64::EPSILON
+            } else {
+                let deviation = current_rate - median;
+                let z = deviation.abs() / effective_mad;
+                if deviation >= 0.0 {
+                    z > config.sensitivity_up
+                } else {
+                    z > config.sensitivity_down
+                }
+            };
+            if is_anomalous {
+                let desc = format_anomaly_description(name, current_rate, median);
+                (true, Some(desc))
+            } else {
+                (false, None)
+            }
+        };
+
+    let (adds_flag, adds_desc) = check_metric("Adds", adds, prev.adds, &|p| p.adds);
+    let (deletes_flag, deletes_desc) = check_metric("Deletes", deletes, prev.deletes, &|p| p.deletes);
+    let (purchases_flag, purchases_desc) = check_metric("Purchases", purchases, prev.purchases, &|p| p.purchases);
+    let (gifts_flag, gifts_desc) = check_metric("Gifts", gifts, prev.gifts, &|p| p.gifts);
+
+    let descriptions: Vec<String> = [adds_desc, deletes_desc, purchases_desc, gifts_desc]
+        .into_iter()
+        .flatten()
+        .collect();
+
+    AnomalyMetrics {
+        adds: adds_flag,
+        deletes: deletes_flag,
+        purchases: purchases_flag,
+        gifts: gifts_flag,
+        descriptions,
+    }
+}
+
+/// Generate a human-readable anomaly description.
+fn format_anomaly_description(metric_name: &str, current_rate: f64, median: f64) -> String {
+    let abs_rate = current_rate.abs();
+    let abs_median = median.abs();
+
+    if abs_median < 0.01 {
+        // Baseline was essentially zero
+        if current_rate > 0.0 {
+            format!("{metric_name} surged to {:.0}/day from near-zero baseline", abs_rate)
+        } else {
+            format!("{metric_name} dropped to {:.0}/day from near-zero baseline", abs_rate)
+        }
+    } else {
+        let ratio = abs_rate / abs_median;
+        let direction = if current_rate > median { "above" } else { "below" };
+        if ratio >= 2.0 {
+            format!(
+                "{metric_name} {:.0}× {direction} normal ({:.0}/day vs ~{:.0}/day)",
+                ratio, abs_rate, abs_median
+            )
+        } else {
+            format!(
+                "{metric_name} unusual at {:.0}/day ({direction} ~{:.0}/day typical)",
+                abs_rate, abs_median
+            )
+        }
+    }
+}
+
+/// GET /api/wishlist/{app_id}/countries/{snapshot_id}
+async fn api_snapshot_countries(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    axum::extract::Path((app_id, snapshot_id)): axum::extract::Path<(u32, i64)>,
+) -> Response {
+    if state.get_session(&jar).await.is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if !state.db.is_tracked(app_id).await.unwrap_or(false) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    let countries = match state.db.get_snapshot_countries(app_id, snapshot_id).await {
+        Ok(Some(c)) => c,
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+
+    Json(SnapshotCountriesResponse {
+        snapshot_id,
+        countries,
     })
     .into_response()
 }
@@ -1264,11 +1759,6 @@ async fn api_admin_config_get(State(state): State<AppState>, jar: CookieJar) -> 
         .get(CONFIG_DISCORD_ENABLED)
         .map(|v| v == "true")
         .unwrap_or(false);
-    let retention_days = config
-        .get(CONFIG_TRACKING_RETENTION_DAYS)
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(DEFAULT_RETENTION_DAYS);
-
     let notification_mode = config
         .get(CONFIG_NOTIFICATION_MODE)
         .cloned()
@@ -1307,7 +1797,6 @@ async fn api_admin_config_get(State(state): State<AppState>, jar: CookieJar) -> 
         telegram_enabled: tg_enabled,
         discord_admin_ids: dc_ids,
         discord_enabled: dc_enabled,
-        tracking_retention_days: retention_days,
         notification_mode,
         anomaly_lookback_days,
         anomaly_sensitivity_up,
@@ -1585,17 +2074,6 @@ async fn api_admin_config_update(
         discord_changed = true;
     }
 
-    if let Some(days) = req.tracking_retention_days {
-        let days = days.max(1); // minimum 1 day
-        if let Err(e) = state
-            .db
-            .set_config(CONFIG_TRACKING_RETENTION_DAYS, &days.to_string())
-            .await
-        {
-            return e.into_response();
-        }
-    }
-
     if let Some(mode) = req.notification_mode {
         let mode = mode.trim().to_string();
         if mode != "every_update" && mode != "anomalies_only" {
@@ -1869,6 +2347,10 @@ async fn api_admin_track_game(
             if let Some(steam) = state.get_steam().await {
                 match steam.fetch_wishlist(app_id).await {
                     Ok(report) => {
+                        // Store app_min_date from the first API response for backfill
+                        if let Some(ref min_date) = report.app_min_date {
+                            let _ = state.db.store_app_min_date(app_id, min_date).await;
+                        }
                         let _ = state.db.insert_snapshot_if_changed(&report).await;
                     }
                     Err(e) => {
@@ -1876,14 +2358,13 @@ async fn api_admin_track_game(
                     }
                 }
 
-                // Auto-populate historical data in background
-                if state.auto_populate_days > 0 {
-                    let bg_state = state.clone();
-                    let bg_steam = steam.clone();
-                    tokio::spawn(async move {
-                        crate::auto_populate_game(&bg_state, &bg_steam, app_id).await;
-                    });
-                }
+                // Backfill full history in background
+                let bg_state = state.clone();
+                let bg_steam = steam.clone();
+                let token = state.start_backfill(app_id).await;
+                tokio::spawn(async move {
+                    crate::backfill_game_history(&bg_state, &bg_steam, app_id, token).await;
+                });
             }
 
             Json(serde_json::json!({
@@ -1918,6 +2399,9 @@ async fn api_admin_untrack_game(
         _ => return StatusCode::UNAUTHORIZED.into_response(),
     }
 
+    // Cancel any in-progress backfill before removing the game
+    state.cancel_backfill(req.app_id).await;
+
     match state.db.remove_tracked_game(req.app_id).await {
         Ok(true) => Json(serde_json::json!({
             "success": true,
@@ -1941,19 +2425,27 @@ async fn static_handler(uri: Uri) -> Response {
     // Try the exact path first
     if let Some(file) = Assets::get(path) {
         let mime = mime_guess::from_path(path).first_or_octet_stream();
+        let cache = cache_control_for(path);
         return (
             StatusCode::OK,
-            [(header::CONTENT_TYPE, mime.as_ref())],
+            [
+                (header::CONTENT_TYPE, mime.as_ref()),
+                (header::CACHE_CONTROL, cache),
+            ],
             file.data,
         )
             .into_response();
     }
 
-    // Fall back to index.html for SPA routing
+    // Fall back to index.html for SPA routing — always revalidate so new
+    // deployments are picked up immediately (hashed asset URLs will change).
     match Assets::get("index.html") {
         Some(file) => (
             StatusCode::OK,
-            [(header::CONTENT_TYPE, "text/html")],
+            [
+                (header::CONTENT_TYPE, "text/html"),
+                (header::CACHE_CONTROL, "no-cache"),
+            ],
             file.data,
         )
             .into_response(),
@@ -1962,6 +2454,19 @@ async fn static_handler(uri: Uri) -> Response {
             Html("<h1>Frontend not built</h1><p>Run <code>npm run build</code> in the <code>web/</code> directory.</p>".to_string()),
         )
             .into_response(),
+    }
+}
+
+/// Return an appropriate Cache-Control value for the given asset path.
+/// `index.html` and other HTML files are never cached (so new deploys take
+/// effect immediately). Everything else (JS, CSS, images, fonts) carries a
+/// content-hash in its filename from the bundler, so it can be cached
+/// immutably for a long time.
+fn cache_control_for(path: &str) -> &'static str {
+    if path == "index.html" || path.ends_with(".html") {
+        "no-cache"
+    } else {
+        "public, max-age=31536000, immutable"
     }
 }
 
@@ -2021,6 +2526,7 @@ async fn debug_test_change(
         adds_linux: 0,
         countries: Vec::new(),
         fetched_at: None,
+        app_min_date: None,
     });
 
     // Generate a fake report with small random deltas
@@ -2036,6 +2542,7 @@ async fn debug_test_change(
         adds_linux: 0,
         countries: Vec::new(),
         fetched_at: None,
+        app_min_date: None,
     };
 
     // Insert the fake snapshot
@@ -2150,7 +2657,11 @@ pub async fn run_web(bind_addr: String, state: AppState) {
         .route("/api/setup", post(api_setup))
         // Authenticated routes
         .route("/api/wishlist", get(api_wishlist))
-        .route("/api/wishlist/{app_id}", get(api_game_detail))
+        // Game detail endpoints (split for scalability)
+        .route("/api/wishlist/{app_id}/detail", get(api_game_detail))
+        .route("/api/wishlist/{app_id}/chart", get(api_game_chart))
+        .route("/api/wishlist/{app_id}/history", get(api_game_history))
+        .route("/api/wishlist/{app_id}/countries/{snapshot_id}", get(api_snapshot_countries))
         // Admin routes
         .route("/api/admin/config", get(api_admin_config_get))
         .route("/api/admin/config", post(api_admin_config_update))

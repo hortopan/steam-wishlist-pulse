@@ -10,7 +10,7 @@ const ENV_DATABASE_PATH: &str = "DATABASE_PATH";
 const ENV_ADMIN_PASSWORD: &str = "ADMIN_PASSWORD";
 const ENV_READ_PASSWORD: &str = "READ_PASSWORD";
 const ENV_POLL_INTERVAL: &str = "POLL_INTERVAL_MINUTES";
-const ENV_AUTO_POPULATE_DAYS: &str = "AUTO_POPULATE_DAYS";
+const ENV_BACKFILL_RATE: &str = "BACKFILL_RATE";
 const ENV_ENCRYPTION_SECRET: &str = "ENCRYPTION_SECRET";
 
 const DEFAULT_BIND_ADDRESS: &str = "0.0.0.0:3000";
@@ -38,8 +38,8 @@ struct CliArgs {
     #[arg(long, help = "Steam polling interval in minutes (default: 5)")]
     poll_interval_minutes: Option<u64>,
 
-    #[arg(long, help = "Number of days to auto-populate historical data for (default: 10)")]
-    auto_populate_days: Option<u32>,
+    #[arg(long, help = "Backfill rate limit in requests per second (default: 1.0)")]
+    backfill_rate: Option<f64>,
 }
 
 pub struct AppConfig {
@@ -49,12 +49,12 @@ pub struct AppConfig {
     pub read_password: Option<String>,
     pub insecure: bool,
     pub poll_interval_minutes: u64,
-    pub auto_populate_days: u32,
+    pub backfill_rate: f64,
     pub encryption_secret: Option<SecretString>,
 }
 
 const DEFAULT_POLL_INTERVAL_MINUTES: u64 = 5;
-const DEFAULT_AUTO_POPULATE_DAYS: u32 = 10;
+const DEFAULT_BACKFILL_RATE: f64 = 1.0;
 
 fn resolve_string(cli: Option<String>, env_name: &str) -> Result<Option<String>, String> {
     let env_val = env::var(env_name).ok();
@@ -93,9 +93,9 @@ fn print_usage_hint() {
         DEFAULT_POLL_INTERVAL_MINUTES,
     );
     eprintln!(
-        "  {} <days>  Days of historical data to auto-populate (default: {})",
-        "--auto-populate-days".green(),
-        DEFAULT_AUTO_POPULATE_DAYS,
+        "  {} <rate>    Backfill rate limit in requests/sec (default: {})",
+        "--backfill-rate".green(),
+        DEFAULT_BACKFILL_RATE,
     );
     eprintln!();
     eprintln!("{}", "ENVIRONMENT VARIABLES:".cyan().bold());
@@ -106,7 +106,7 @@ fn print_usage_hint() {
         ENV_BIND_WEB_INTERFACE.yellow(),
         ENV_DATABASE_PATH.yellow(),
         ENV_POLL_INTERVAL.yellow(),
-        ENV_AUTO_POPULATE_DAYS.yellow(),
+        ENV_BACKFILL_RATE.yellow(),
         ENV_ENCRYPTION_SECRET.yellow(),
     );
     eprintln!();
@@ -117,7 +117,7 @@ fn print_usage_hint() {
     eprintln!();
     eprintln!(
         "  {}",
-        "Steam API key, Telegram config, watched games, and retention days".dimmed()
+        "Steam API key, Telegram config, and watched games".dimmed()
     );
     eprintln!("  {}", "are configured via the admin web panel.".dimmed());
     eprintln!();
@@ -169,15 +169,21 @@ fn build_config(args: CliArgs) -> Result<AppConfig, String> {
         return Err("Poll interval must be at least 1 minute".to_string());
     }
 
-    let auto_populate_str = resolve_string(
-        args.auto_populate_days.map(|v| v.to_string()),
-        ENV_AUTO_POPULATE_DAYS,
+    let backfill_rate_str = resolve_string(
+        args.backfill_rate.map(|v| v.to_string()),
+        ENV_BACKFILL_RATE,
     )?;
-    let auto_populate_days = match auto_populate_str {
-        Some(s) => s
-            .parse::<u32>()
-            .map_err(|_| format!("Invalid auto-populate-days: '{s}' (must be a positive integer)"))?,
-        None => DEFAULT_AUTO_POPULATE_DAYS,
+    let backfill_rate = match backfill_rate_str {
+        Some(s) => {
+            let rate = s
+                .parse::<f64>()
+                .map_err(|_| format!("Invalid backfill-rate: '{s}' (must be a positive number)"))?;
+            if rate <= 0.0 {
+                return Err("Backfill rate must be greater than 0".to_string());
+            }
+            rate
+        }
+        None => DEFAULT_BACKFILL_RATE,
     };
 
     Ok(AppConfig {
@@ -187,7 +193,7 @@ fn build_config(args: CliArgs) -> Result<AppConfig, String> {
         read_password,
         insecure: args.insecure,
         poll_interval_minutes,
-        auto_populate_days,
+        backfill_rate,
         encryption_secret: env::var(ENV_ENCRYPTION_SECRET)
             .ok()
             .filter(|s| !s.is_empty())

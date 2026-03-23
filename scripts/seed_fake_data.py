@@ -45,6 +45,84 @@ def default_db_path():
     return os.path.join(base, "wishlist-pulse", "data.db")
 
 
+def _generate_events(days, start):
+    """Pre-generate random events that affect wishlist activity.
+
+    The key insight for anomaly detection: most days must be stable/predictable
+    so that MAD stays low. Anomalous events are rare, sharp, and isolated —
+    they need to clearly exceed the baseline variability.
+    """
+    events = {}
+
+    # Steam seasonal sales (roughly accurate windows)
+    sale_ranges = []
+    for year_offset in range(-1, 3):
+        base_year = start.year + year_offset
+        sale_ranges.append((datetime(base_year, 6, 23), datetime(base_year, 7, 7)))
+        sale_ranges.append((datetime(base_year, 11, 21), datetime(base_year, 11, 28)))
+        sale_ranges.append((datetime(base_year, 12, 19), datetime(base_year + 1, 1, 2)))
+        sale_ranges.append((datetime(base_year, 3, 14), datetime(base_year, 3, 21)))
+        sale_ranges.append((datetime(base_year, 10, 28), datetime(base_year, 11, 1)))
+
+    for day in range(days):
+        dt = start + timedelta(days=day)
+        for sale_start, sale_end in sale_ranges:
+            if sale_start <= dt <= sale_end:
+                days_into_sale = (dt - sale_start).days
+                sale_intensity = max(0.3, 1.0 - days_into_sale * 0.08)
+                events[day] = {"type": "sale", "intensity": sale_intensity}
+                break
+
+    # Guaranteed anomaly spikes — these are sharp 1-2 day events designed to
+    # stand out against a stable baseline. Placed at least 20 days apart so
+    # they don't contaminate each other's lookback windows.
+    anomaly_candidates = [d for d in range(20, days) if d not in events]
+    random.shuffle(anomaly_candidates)
+    num_anomalies = max(3, days // 40)
+    placed = []
+    for d in anomaly_candidates:
+        if len(placed) >= num_anomalies:
+            break
+        # Ensure at least 20 days gap from other anomalies
+        if any(abs(d - p) < 20 for p in placed):
+            continue
+        placed.append(d)
+        # Massive spike: 5-15x the baseline rate
+        events[d] = {"type": "anomaly_spike", "intensity": random.uniform(5.0, 15.0)}
+        # Optional second day at reduced intensity
+        if d + 1 < days and d + 1 not in events and random.random() < 0.5:
+            events[d + 1] = {"type": "anomaly_spike", "intensity": random.uniform(2.0, 5.0)}
+
+    # Guaranteed anomaly drops — sudden near-zero days
+    num_drops = max(2, days // 60)
+    drop_placed = []
+    for d in anomaly_candidates:
+        if len(drop_placed) >= num_drops:
+            break
+        if d in events or any(abs(d - p) < 20 for p in placed + drop_placed):
+            continue
+        drop_placed.append(d)
+        events[d] = {"type": "anomaly_drop", "intensity": random.uniform(0.02, 0.1)}
+
+    # Mild viral bumps (not necessarily anomalous, just variety)
+    num_bumps = max(1, days // 60)
+    for _ in range(num_bumps):
+        bump_day = random.randint(0, days - 1)
+        if bump_day not in events:
+            events[bump_day] = {"type": "viral", "intensity": random.uniform(1.5, 2.5)}
+
+    # Mild lulls
+    num_lulls = max(1, days // 60)
+    for _ in range(num_lulls):
+        lull_day = random.randint(0, days - 1)
+        duration = random.randint(2, 5)
+        for d in range(duration):
+            if lull_day + d < days and lull_day + d not in events:
+                events[lull_day + d] = {"type": "lull", "intensity": random.uniform(0.5, 0.7)}
+
+    return events
+
+
 def generate_snapshots(app_id, days, per_day, base_adds, trend):
     """Generate cumulative snapshot data with realistic patterns."""
     now = datetime.utcnow()
@@ -61,27 +139,116 @@ def generate_snapshots(app_id, days, per_day, base_adds, trend):
     total_weight = sum(w for _, w in COUNTRIES)
     ts = start
 
-    for day in range(days):
-        # Daily rate with trend, seasonality, and noise
-        day_factor = trend ** day
-        # Weekly seasonality: weekends get ~30% more adds
-        weekday = (start + timedelta(days=day)).weekday()
-        weekend_boost = 1.3 if weekday >= 5 else 1.0
-        # Slight monthly wave
-        monthly_wave = 1.0 + 0.1 * math.sin(2 * math.pi * day / 30)
+    # Pre-generate events
+    events = _generate_events(days, start)
 
-        daily_adds = base_adds * day_factor * weekend_boost * monthly_wave
-        daily_deletes = daily_adds * random.uniform(0.05, 0.15)
-        daily_purchases = daily_adds * random.uniform(0.02, 0.08)
-        daily_gifts = daily_adds * random.uniform(0.005, 0.02)
+    # Running "momentum" — smooths day-to-day changes
+    momentum = 1.0
+
+    for day in range(days):
+        # Daily rate with trend
+        day_factor = trend ** day
+
+        # Initial launch hype decay (first ~30 days are boosted then settle)
+        if day < 5:
+            launch_factor = 3.0 - (day * 0.3)
+        elif day < 30:
+            launch_factor = 1.5 * (0.97 ** (day - 5))
+        else:
+            launch_factor = 1.0
+
+        # Weekly seasonality — kept mild so it doesn't inflate MAD
+        weekday = (start + timedelta(days=day)).weekday()
+        if weekday == 5:    # Saturday
+            weekday_factor = random.uniform(1.10, 1.20)
+        elif weekday == 6:  # Sunday
+            weekday_factor = random.uniform(1.05, 1.15)
+        elif weekday == 4:  # Friday
+            weekday_factor = random.uniform(1.02, 1.08)
+        elif weekday in (1, 2):  # Tue, Wed
+            weekday_factor = random.uniform(0.88, 0.95)
+        else:
+            weekday_factor = random.uniform(0.95, 1.05)
+
+        # Monthly wave — subtle
+        day_of_month = (start + timedelta(days=day)).day
+        if day_of_month <= 3 or 14 <= day_of_month <= 17:
+            monthly_wave = random.uniform(1.03, 1.08)
+        else:
+            monthly_wave = 1.0 + 0.03 * math.sin(2 * math.pi * day / 30)
+
+        # Event effects
+        event = events.get(day)
+        if event:
+            if event["type"] == "sale":
+                event_mult = 1.0 + event["intensity"] * random.uniform(1.5, 2.5)
+                sale_purchase_boost = 2.0 + event["intensity"] * 3.0
+                sale_delete_boost = 1.5 + event["intensity"] * 1.0
+            elif event["type"] == "anomaly_spike":
+                # Sharp isolated spike — guaranteed to exceed MAD threshold
+                event_mult = event["intensity"]
+                sale_purchase_boost = random.uniform(2.0, 4.0)
+                sale_delete_boost = random.uniform(1.5, 3.0)
+            elif event["type"] == "anomaly_drop":
+                # Sharp isolated drop — near zero activity
+                event_mult = event["intensity"]
+                sale_purchase_boost = event["intensity"]
+                sale_delete_boost = event["intensity"]
+            elif event["type"] == "viral":
+                event_mult = event["intensity"]
+                sale_purchase_boost = 1.0
+                sale_delete_boost = 1.0
+            elif event["type"] == "lull":
+                event_mult = event["intensity"]
+                sale_purchase_boost = 1.0
+                sale_delete_boost = 1.0
+            else:
+                event_mult = 1.0
+                sale_purchase_boost = 1.0
+                sale_delete_boost = 1.0
+        else:
+            event_mult = 1.0
+            sale_purchase_boost = 1.0
+            sale_delete_boost = 1.0
+
+        # Day-to-day random walk — small steps to keep baseline stable
+        momentum += random.gauss(0, 0.03)
+        momentum = max(0.8, min(1.2, momentum))  # tight clamp
+
+        # Combine all factors
+        combined = (base_adds * day_factor * launch_factor * weekday_factor
+                     * monthly_wave * event_mult * momentum)
+
+        # Tight per-day noise — keeps MAD low so anomalies stand out
+        daily_adds = combined * random.uniform(0.92, 1.08)
+
+        # Deletes/purchases/gifts with stable ratios
+        delete_rate = random.uniform(0.08, 0.15) * sale_delete_boost
+        purchase_rate = random.uniform(0.03, 0.08) * sale_purchase_boost
+        gift_rate = random.uniform(0.008, 0.02)
+
+        daily_deletes = daily_adds * delete_rate
+        daily_purchases = daily_adds * purchase_rate
+        daily_gifts = daily_adds * gift_rate
+
+        # Time-of-day activity curve (peak at ~20:00 UTC, trough at ~06:00 UTC)
+        hour_weights = []
+        for snap_i in range(per_day):
+            hour = (snap_i * 24.0 / per_day) % 24
+            # Bell curve peaking around 19-20 UTC
+            w = 0.4 + 0.6 * math.exp(-0.5 * ((hour - 19.5) / 5.0) ** 2)
+            # Secondary smaller peak around 10 UTC (Europe morning)
+            w += 0.2 * math.exp(-0.5 * ((hour - 10.0) / 3.0) ** 2)
+            hour_weights.append(w)
+        weight_sum = sum(hour_weights)
+        hour_weights = [w / weight_sum for w in hour_weights]
 
         for snap_i in range(per_day):
-            # Distribute daily totals across snapshots with some noise
-            frac = (1.0 / per_day) * random.uniform(0.7, 1.3)
+            frac = hour_weights[snap_i] * random.uniform(0.85, 1.15)
 
-            snap_adds = max(0, int(daily_adds * frac + random.gauss(0, 2)))
-            snap_deletes = max(0, int(daily_deletes * frac + random.gauss(0, 1)))
-            snap_purchases = max(0, int(daily_purchases * frac + random.gauss(0, 0.5)))
+            snap_adds = max(0, int(daily_adds * frac + random.gauss(0, max(1, daily_adds * frac * 0.1))))
+            snap_deletes = max(0, int(daily_deletes * frac + random.gauss(0, max(0.5, daily_deletes * frac * 0.15))))
+            snap_purchases = max(0, int(daily_purchases * frac + random.gauss(0, max(0.3, daily_purchases * frac * 0.2))))
             snap_gifts = max(0, int(daily_gifts * frac + random.gauss(0, 0.3)))
 
             total_adds += snap_adds
@@ -89,9 +256,13 @@ def generate_snapshots(app_id, days, per_day, base_adds, trend):
             total_purchases += snap_purchases
             total_gifts += snap_gifts
 
-            # Platform split (roughly: 85% Windows, 10% Mac, 5% Linux)
-            adds_win = int(snap_adds * random.uniform(0.80, 0.90))
-            adds_mac = int(snap_adds * random.uniform(0.06, 0.12))
+            # Platform split with realistic variance
+            win_share = random.gauss(0.85, 0.03)
+            mac_share = random.gauss(0.10, 0.02)
+            linux_share = max(0.02, 1.0 - win_share - mac_share)
+            total_share = win_share + mac_share + linux_share
+            adds_win = int(snap_adds * win_share / total_share)
+            adds_mac = int(snap_adds * mac_share / total_share)
             adds_linux = max(0, snap_adds - adds_win - adds_mac)
 
             date_str = ts.strftime("%Y-%m-%d")
@@ -141,7 +312,7 @@ def generate_snapshots(app_id, days, per_day, base_adds, trend):
 
             ts += interval
 
-    return snapshots
+    return snapshots, events
 
 
 def main():
@@ -170,7 +341,7 @@ def main():
     print(f"  Base adds/day: {args.base_adds}, trend: {args.trend}")
     print(f"  Database: {db_path}")
 
-    snapshots = generate_snapshots(
+    snapshots, injected_events = generate_snapshots(
         args.app_id, args.days, args.per_day, args.base_adds, args.trend
     )
 
@@ -232,6 +403,19 @@ def main():
     print(f"    Deletes: {final['deletes']:,}")
     print(f"    Purchases: {final['purchases']:,}")
     print(f"    Gifts: {final['gifts']:,}")
+
+    # Show injected anomaly events so user can verify detection
+    anomaly_events = {d: e for d, e in injected_events.items()
+                      if e["type"] in ("anomaly_spike", "anomaly_drop")}
+    if anomaly_events:
+        now = datetime.utcnow()
+        event_start = now - timedelta(days=args.days)
+        print(f"\n  Injected anomaly events ({len(anomaly_events)} days):")
+        for d in sorted(anomaly_events):
+            e = anomaly_events[d]
+            dt = event_start + timedelta(days=d)
+            label = "SPIKE" if e["type"] == "anomaly_spike" else "DROP"
+            print(f"    {dt.strftime('%Y-%m-%d')} — {label} {e['intensity']:.1f}x")
 
 
 if __name__ == "__main__":

@@ -166,6 +166,14 @@ impl Database {
                 app_id  INTEGER NOT NULL,
                 date    TEXT NOT NULL,
                 PRIMARY KEY (app_id, date)
+            );
+
+            CREATE TABLE IF NOT EXISTS backfill_failed_dates (
+                app_id         INTEGER NOT NULL,
+                date           TEXT NOT NULL,
+                fail_count     INTEGER NOT NULL DEFAULT 1,
+                last_failed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                PRIMARY KEY (app_id, date)
             );",
         )?;
 
@@ -175,6 +183,9 @@ impl Database {
                 &format!("ALTER TABLE wishlist_snapshots ADD COLUMN {col} INTEGER NOT NULL DEFAULT 0"),
             );
         }
+
+        // Add min_date column to app_info (safe to run repeatedly)
+        let _ = conn.execute_batch("ALTER TABLE app_info ADD COLUMN min_date TEXT");
 
         Ok(())
     }
@@ -234,6 +245,7 @@ impl Database {
             conn.execute("DELETE FROM wishlist_snapshots WHERE app_id = ?1", [app_id])?;
             conn.execute("DELETE FROM app_info WHERE app_id = ?1", [app_id])?;
             conn.execute("DELETE FROM crawled_dates WHERE app_id = ?1", [app_id])?;
+            conn.execute("DELETE FROM backfill_failed_dates WHERE app_id = ?1", [app_id])?;
         }
         Ok(changed > 0)
     }
@@ -296,6 +308,7 @@ impl Database {
                     adds_linux: row.get(9)?,
                     countries: Vec::new(),
                     fetched_at: row.get(10)?,
+                    app_min_date: None,
                 }))
             })
             .ok();
@@ -424,8 +437,20 @@ impl Database {
     }
 
     /// Insert a snapshot with a specific fetched_at timestamp (for backfilling historical data).
+    /// Skips the insert if a snapshot already exists for this (app_id, date).
     pub async fn insert_backfill_snapshot(&self, report: &WishlistReport, fetched_at: &str) -> AppResult<()> {
         let conn = self.pool.get().await;
+
+        // Skip if a snapshot already exists for this date (e.g. from the initial fetch on track)
+        let exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM wishlist_snapshots WHERE app_id = ?1 AND date = ?2)",
+            rusqlite::params![report.app_id, report.date],
+            |row| row.get(0),
+        )?;
+        if exists {
+            return Ok(());
+        }
+
         conn.execute(
             "INSERT INTO wishlist_snapshots (app_id, date, adds, deletes, purchases, gifts, adds_windows, adds_mac, adds_linux, fetched_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
@@ -448,14 +473,57 @@ impl Database {
         Ok(())
     }
 
-    pub async fn purge_old_snapshots(&self, retention_days: u32) -> AppResult<u64> {
+    // ── Backfill failure tracking ──────────────────────────────────
+
+    pub async fn mark_date_failed(&self, app_id: u32, date: &str) -> AppResult<()> {
         let conn = self.pool.get().await;
-        let deleted = conn.execute(
-            "DELETE FROM wishlist_snapshots
-             WHERE date < date('now', ?1)",
-            [format!("-{retention_days} days")],
+        conn.execute(
+            "INSERT INTO backfill_failed_dates (app_id, date, fail_count, last_failed_at)
+             VALUES (?1, ?2, 1, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+             ON CONFLICT(app_id, date) DO UPDATE SET
+                fail_count = fail_count + 1,
+                last_failed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
+            rusqlite::params![app_id, date],
         )?;
-        Ok(deleted as u64)
+        Ok(())
+    }
+
+    pub async fn clear_failed_date(&self, app_id: u32, date: &str) -> AppResult<()> {
+        let conn = self.pool.get().await;
+        conn.execute(
+            "DELETE FROM backfill_failed_dates WHERE app_id = ?1 AND date = ?2",
+            rusqlite::params![app_id, date],
+        )?;
+        Ok(())
+    }
+
+    pub async fn get_failed_dates(&self, app_id: u32) -> AppResult<std::collections::HashSet<String>> {
+        let conn = self.pool.get().await;
+        let mut stmt = conn.prepare(
+            "SELECT date FROM backfill_failed_dates WHERE app_id = ?1",
+        )?;
+        let dates = stmt
+            .query_map([app_id], |row| row.get::<_, String>(0))?
+            .collect::<Result<std::collections::HashSet<String>, _>>()?;
+        Ok(dates)
+    }
+
+    // ── App min date (cached from Steam API) ────────────────────────
+
+    pub async fn store_app_min_date(&self, app_id: u32, min_date: &str) -> AppResult<()> {
+        let conn = self.pool.get().await;
+        conn.execute(
+            "UPDATE app_info SET min_date = ?2 WHERE app_id = ?1",
+            rusqlite::params![app_id, min_date],
+        )?;
+        Ok(())
+    }
+
+    pub async fn get_app_min_date(&self, app_id: u32) -> AppResult<Option<String>> {
+        let conn = self.pool.get().await;
+        let mut stmt = conn.prepare("SELECT min_date FROM app_info WHERE app_id = ?1")?;
+        let result = stmt.query_row([app_id], |row| row.get::<_, Option<String>>(0)).ok().flatten();
+        Ok(result)
     }
 
     // ── App info (name & image cache) ────────────────────────────────
@@ -551,42 +619,6 @@ impl Database {
         Ok(rows)
     }
 
-    /// Get all snapshots for a specific game, ordered by date then fetched_at.
-    pub async fn get_snapshots_for_game(&self, app_id: u32) -> AppResult<Vec<WishlistReport>> {
-        let conn = self.pool.get().await;
-        let mut stmt = conn.prepare(
-            "SELECT id, app_id, date, adds, deletes, purchases, gifts,
-                    adds_windows, adds_mac, adds_linux, fetched_at
-             FROM wishlist_snapshots
-             WHERE app_id = ?1
-             ORDER BY fetched_at ASC",
-        )?;
-        let rows: Vec<(i64, WishlistReport)> = stmt
-            .query_map([app_id], |row| {
-                Ok((row.get(0)?, WishlistReport {
-                    app_id: row.get(1)?,
-                    date: row.get(2)?,
-                    adds: row.get(3)?,
-                    deletes: row.get(4)?,
-                    purchases: row.get(5)?,
-                    gifts: row.get(6)?,
-                    adds_windows: row.get(7)?,
-                    adds_mac: row.get(8)?,
-                    adds_linux: row.get(9)?,
-                    countries: Vec::new(),
-                    fetched_at: row.get(10)?,
-                }))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let mut reports = Vec::with_capacity(rows.len());
-        for (snapshot_id, mut report) in rows {
-            report.countries = Self::load_countries(&conn, snapshot_id)?;
-            reports.push(report);
-        }
-        Ok(reports)
-    }
-
     /// Get the latest snapshot for each tracked game (most recent per app_id).
     /// Games without any snapshot yet are included with zeroed stats.
     pub async fn get_latest_snapshots(&self) -> AppResult<Vec<WishlistReport>> {
@@ -627,6 +659,7 @@ impl Database {
                     adds_linux: row.get(9)?,
                     countries: Vec::new(),
                     fetched_at: row.get(10)?,
+                    app_min_date: None,
                 }))
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -639,6 +672,62 @@ impl Database {
             reports.push(report);
         }
         Ok(reports)
+    }
+
+    /// Get all-time totals (sum of all snapshots) for a single game.
+    pub async fn get_game_totals(&self, app_id: u32) -> AppResult<Option<GameTotals>> {
+        let conn = self.pool.get().await;
+        let mut stmt = conn.prepare(
+            "SELECT COALESCE(SUM(adds), 0),
+                    COALESCE(SUM(deletes), 0),
+                    COALESCE(SUM(purchases), 0),
+                    COALESCE(SUM(gifts), 0)
+             FROM wishlist_snapshots
+             WHERE app_id = ?1",
+        )?;
+        let result = stmt.query_row([app_id], |row| {
+            Ok(GameTotals {
+                adds: row.get(0)?,
+                deletes: row.get(1)?,
+                purchases: row.get(2)?,
+                gifts: row.get(3)?,
+            })
+        });
+        match result {
+            Ok(t) => Ok(Some(t)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Get all-time totals (sum of all snapshots) for every tracked game.
+    pub async fn get_all_game_totals(&self) -> AppResult<HashMap<u32, GameTotals>> {
+        let conn = self.pool.get().await;
+        let mut stmt = conn.prepare(
+            "SELECT app_id,
+                    COALESCE(SUM(adds), 0),
+                    COALESCE(SUM(deletes), 0),
+                    COALESCE(SUM(purchases), 0),
+                    COALESCE(SUM(gifts), 0)
+             FROM wishlist_snapshots
+             GROUP BY app_id",
+        )?;
+        let map = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, u32>(0)?,
+                    GameTotals {
+                        adds: row.get(1)?,
+                        deletes: row.get(2)?,
+                        purchases: row.get(3)?,
+                        gifts: row.get(4)?,
+                    },
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .collect();
+        Ok(map)
     }
 
     // ── Anomaly detection queries ──────────────────────────────────────
@@ -792,15 +881,279 @@ impl Database {
 
         Ok(result)
     }
+
+    /// Get aggregated chart data for a game within a time range.
+    /// Resolution determines the GROUP BY: "raw" returns individual snapshots,
+    /// "daily" groups by date, "weekly" by ISO week, "monthly" by month.
+    pub async fn get_chart_data(
+        &self,
+        app_id: u32,
+        since: &str,
+        resolution: &str,
+    ) -> AppResult<Vec<ChartPoint>> {
+        let conn = self.pool.get().await;
+        let since = since.to_string();
+
+        match resolution {
+            "raw" => {
+                let mut stmt = conn.prepare(
+                    "SELECT COALESCE(fetched_at, date) as label,
+                            adds, deletes, purchases, gifts,
+                            adds_windows, adds_mac, adds_linux
+                     FROM wishlist_snapshots
+                     WHERE app_id = ?1 AND fetched_at >= ?2
+                     ORDER BY fetched_at ASC",
+                )?;
+                let rows = stmt
+                    .query_map(rusqlite::params![app_id, since], |row| {
+                        Ok(ChartPoint {
+                            label: row.get(0)?,
+                            adds: row.get(1)?,
+                            deletes: row.get(2)?,
+                            purchases: row.get(3)?,
+                            gifts: row.get(4)?,
+                            adds_windows: row.get(5)?,
+                            adds_mac: row.get(6)?,
+                            adds_linux: row.get(7)?,
+                        })
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            }
+            "daily" => {
+                let mut stmt = conn.prepare(
+                    "SELECT date as label,
+                            MAX(adds), MAX(deletes), MAX(purchases), MAX(gifts),
+                            MAX(adds_windows), MAX(adds_mac), MAX(adds_linux)
+                     FROM wishlist_snapshots
+                     WHERE app_id = ?1 AND fetched_at >= ?2
+                     GROUP BY date
+                     ORDER BY date ASC",
+                )?;
+                let rows = stmt
+                    .query_map(rusqlite::params![app_id, since], |row| {
+                        Ok(ChartPoint {
+                            label: row.get(0)?,
+                            adds: row.get(1)?,
+                            deletes: row.get(2)?,
+                            purchases: row.get(3)?,
+                            gifts: row.get(4)?,
+                            adds_windows: row.get(5)?,
+                            adds_mac: row.get(6)?,
+                            adds_linux: row.get(7)?,
+                        })
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            }
+            "weekly" => {
+                let mut stmt = conn.prepare(
+                    "SELECT strftime('%Y-W%W', fetched_at) as label,
+                            MAX(adds), MAX(deletes), MAX(purchases), MAX(gifts),
+                            MAX(adds_windows), MAX(adds_mac), MAX(adds_linux)
+                     FROM wishlist_snapshots
+                     WHERE app_id = ?1 AND fetched_at >= ?2
+                     GROUP BY strftime('%Y-W%W', fetched_at)
+                     ORDER BY label ASC",
+                )?;
+                let rows = stmt
+                    .query_map(rusqlite::params![app_id, since], |row| {
+                        Ok(ChartPoint {
+                            label: row.get(0)?,
+                            adds: row.get(1)?,
+                            deletes: row.get(2)?,
+                            purchases: row.get(3)?,
+                            gifts: row.get(4)?,
+                            adds_windows: row.get(5)?,
+                            adds_mac: row.get(6)?,
+                            adds_linux: row.get(7)?,
+                        })
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            }
+            "monthly" => {
+                let mut stmt = conn.prepare(
+                    "SELECT strftime('%Y-%m', fetched_at) as label,
+                            MAX(adds), MAX(deletes), MAX(purchases), MAX(gifts),
+                            MAX(adds_windows), MAX(adds_mac), MAX(adds_linux)
+                     FROM wishlist_snapshots
+                     WHERE app_id = ?1 AND fetched_at >= ?2
+                     GROUP BY strftime('%Y-%m', fetched_at)
+                     ORDER BY label ASC",
+                )?;
+                let rows = stmt
+                    .query_map(rusqlite::params![app_id, since], |row| {
+                        Ok(ChartPoint {
+                            label: row.get(0)?,
+                            adds: row.get(1)?,
+                            deletes: row.get(2)?,
+                            purchases: row.get(3)?,
+                            gifts: row.get(4)?,
+                            adds_windows: row.get(5)?,
+                            adds_mac: row.get(6)?,
+                            adds_linux: row.get(7)?,
+                        })
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            }
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    /// Get paginated snapshots for a game (newest first), without country data.
+    /// Returns (snapshot_id, report) pairs and the total count.
+    pub async fn get_snapshots_paginated(
+        &self,
+        app_id: u32,
+        page: usize,
+        per_page: usize,
+    ) -> AppResult<PaginatedSnapshots> {
+        let conn = self.pool.get().await;
+
+        let total: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM wishlist_snapshots WHERE app_id = ?1",
+            [app_id],
+            |row| row.get(0),
+        )?;
+        let total = total as usize;
+
+        let offset = (page.saturating_sub(1) * per_page) as i64;
+        let per_page_i64 = per_page as i64;
+        let mut stmt = conn.prepare(
+            "SELECT id, app_id, date, adds, deletes, purchases, gifts,
+                    adds_windows, adds_mac, adds_linux, fetched_at
+             FROM wishlist_snapshots
+             WHERE app_id = ?1
+             ORDER BY fetched_at DESC
+             LIMIT ?2 OFFSET ?3",
+        )?;
+        let rows = stmt
+            .query_map(rusqlite::params![app_id, per_page_i64, offset], |row| {
+                Ok((row.get(0)?, WishlistReport {
+                    app_id: row.get(1)?,
+                    date: row.get(2)?,
+                    adds: row.get(3)?,
+                    deletes: row.get(4)?,
+                    purchases: row.get(5)?,
+                    gifts: row.get(6)?,
+                    adds_windows: row.get(7)?,
+                    adds_mac: row.get(8)?,
+                    adds_linux: row.get(9)?,
+                    countries: Vec::new(),
+                    fetched_at: row.get(10)?,
+                    app_min_date: None,
+                }))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(PaginatedSnapshots {
+            snapshots: rows,
+            total,
+        })
+    }
+
+    /// Get raw snapshots within a bounded time range (for anomaly lookback context).
+    pub async fn get_raw_snapshots_between(
+        &self,
+        app_id: u32,
+        since: &str,
+        until: &str,
+    ) -> AppResult<Vec<ChartPoint>> {
+        let conn = self.pool.get().await;
+        let mut stmt = conn.prepare(
+            "SELECT COALESCE(fetched_at, date) as label,
+                    adds, deletes, purchases, gifts,
+                    adds_windows, adds_mac, adds_linux
+             FROM wishlist_snapshots
+             WHERE app_id = ?1 AND fetched_at >= ?2 AND fetched_at <= ?3
+             ORDER BY fetched_at ASC",
+        )?;
+        let rows = stmt
+            .query_map(rusqlite::params![app_id, since, until], |row| {
+                Ok(ChartPoint {
+                    label: row.get(0)?,
+                    adds: row.get(1)?,
+                    deletes: row.get(2)?,
+                    purchases: row.get(3)?,
+                    gifts: row.get(4)?,
+                    adds_windows: row.get(5)?,
+                    adds_mac: row.get(6)?,
+                    adds_linux: row.get(7)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Get country data for a specific snapshot, verifying it belongs to the given app.
+    /// Returns `None` if the snapshot doesn't exist or doesn't belong to `app_id`.
+    pub async fn get_snapshot_countries(
+        &self,
+        app_id: u32,
+        snapshot_id: i64,
+    ) -> AppResult<Option<Vec<CountryReport>>> {
+        let conn = self.pool.get().await;
+        let owns: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM wishlist_snapshots WHERE id = ?1 AND app_id = ?2",
+                rusqlite::params![snapshot_id, app_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|c| c > 0)
+            .unwrap_or(false);
+        if !owns {
+            return Ok(None);
+        }
+        Ok(Some(Self::load_countries(&conn, snapshot_id)?))
+    }
+
 }
 
 /// Compute elapsed days between two ISO 8601 timestamps.
 pub fn elapsed_days(from: &str, to: &str) -> f64 {
-    use chrono::NaiveDateTime;
+    use chrono::{NaiveDate, NaiveDateTime};
     let parse = |s: &str| {
+        // Full datetime: "2025-01-15T12:30:00Z" or "2025-01-15 12:30:00"
         NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%SZ")
             .or_else(|_| NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S"))
             .ok()
+            // Date only: "2025-01-15"
+            .or_else(|| {
+                NaiveDate::parse_from_str(s, "%Y-%m-%d")
+                    .ok()
+                    .and_then(|d| d.and_hms_opt(0, 0, 0))
+            })
+            // Weekly: "2025-W03" (SQLite %W = Monday-start week 00-53)
+            .or_else(|| {
+                if s.len() >= 7 && s.contains("-W") {
+                    let parts: Vec<&str> = s.split("-W").collect();
+                    if parts.len() == 2 {
+                        let year: i32 = parts[0].parse().ok()?;
+                        let week: u32 = parts[1].parse().ok()?;
+                        // Approximate: Jan 1 + week * 7 days
+                        let jan1 = NaiveDate::from_ymd_opt(year, 1, 1)?;
+                        let day = jan1 + chrono::Duration::days(week as i64 * 7);
+                        day.and_hms_opt(0, 0, 0)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+            // Monthly: "2025-01"
+            .or_else(|| {
+                if s.len() == 7 && s.as_bytes()[4] == b'-' {
+                    let year: i32 = s[..4].parse().ok()?;
+                    let month: u32 = s[5..7].parse().ok()?;
+                    NaiveDate::from_ymd_opt(year, month, 1)
+                        .and_then(|d| d.and_hms_opt(0, 0, 0))
+                } else {
+                    None
+                }
+            })
     };
     match (parse(from), parse(to)) {
         (Some(a), Some(b)) => (b - a).num_seconds() as f64 / 86400.0,
@@ -820,6 +1173,32 @@ pub struct SnapshotDelta {
 pub struct CountryDelta {
     pub adds_rate: f64,
     pub deletes_rate: f64,
+}
+
+/// All-time totals for a single game (summed across all snapshots).
+pub struct GameTotals {
+    pub adds: i64,
+    pub deletes: i64,
+    pub purchases: i64,
+    pub gifts: i64,
+}
+
+/// A single aggregated chart data point.
+pub struct ChartPoint {
+    pub label: String,
+    pub adds: i64,
+    pub deletes: i64,
+    pub purchases: i64,
+    pub gifts: i64,
+    pub adds_windows: i64,
+    pub adds_mac: i64,
+    pub adds_linux: i64,
+}
+
+/// Result for a paginated history query.
+pub struct PaginatedSnapshots {
+    pub snapshots: Vec<(i64, WishlistReport)>,
+    pub total: usize,
 }
 
 /// Determine the default database path for the current platform.

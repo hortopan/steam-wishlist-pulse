@@ -68,6 +68,8 @@ pub struct SteamClient {
     app_info: Arc<RwLock<HashMap<u32, AppInfo>>>,
     /// Shared rate limiter: 10 requests burst, refilling at 2/sec.
     rate_limiter: Arc<Mutex<RateLimiter>>,
+    /// Separate rate limiter for backfill operations so they don't starve normal polling.
+    backfill_rate_limiter: Arc<Mutex<RateLimiter>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -128,6 +130,8 @@ pub struct WishlistReport {
     pub countries: Vec<CountryReport>,
     /// ISO 8601 timestamp of when this snapshot was saved to the DB.
     pub fetched_at: Option<String>,
+    /// Earliest date for which Steam has data for this app.
+    pub app_min_date: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -160,13 +164,15 @@ pub async fn validate_api_key(key: &str) -> AppResult<()> {
 }
 
 impl SteamClient {
-    pub fn new(api_key: String) -> Self {
+    pub fn new(api_key: String, backfill_rate: f64) -> Self {
         Self {
             http: Client::new(),
             api_key: Arc::new(RwLock::new(api_key)),
             app_info: Arc::new(RwLock::new(HashMap::new())),
             // Allow bursts of 10 requests, refill at 2 per second
             rate_limiter: Arc::new(Mutex::new(RateLimiter::new(10.0, 2.0))),
+            // Backfill uses a slower, configurable rate to avoid starving normal polling
+            backfill_rate_limiter: Arc::new(Mutex::new(RateLimiter::new(3.0, backfill_rate))),
         }
     }
 
@@ -243,9 +249,16 @@ impl SteamClient {
         date: &str,
     ) -> AppResult<WishlistReport> {
         tracing::debug!("Requesting wishlist: {WISHLIST_API_URL}?appid={app_id}&date={date}");
-
         self.rate_limiter.lock().await.acquire().await;
+        self.fetch_wishlist_inner(app_id, date).await
+    }
 
+    /// Shared implementation for fetching wishlist data (called after rate limiting).
+    async fn fetch_wishlist_inner(
+        &self,
+        app_id: u32,
+        date: &str,
+    ) -> AppResult<WishlistReport> {
         let api_key = self.api_key.read().await.clone();
         let resp = self
             .http
@@ -318,7 +331,19 @@ impl SteamClient {
             adds_linux: summary.wishlist_adds_linux.unwrap_or(0),
             countries,
             fetched_at: None,
+            app_min_date: resp_body.app_min_date,
         })
+    }
+
+    /// Fetch wishlist data for backfill purposes, using the slower backfill rate limiter.
+    pub async fn fetch_wishlist_for_backfill(
+        &self,
+        app_id: u32,
+        date: &str,
+    ) -> AppResult<WishlistReport> {
+        tracing::debug!("Backfill request: appid={app_id}&date={date}");
+        self.backfill_rate_limiter.lock().await.acquire().await;
+        self.fetch_wishlist_inner(app_id, date).await
     }
 
     /// Fetch wishlist data for multiple apps, up to 5 at a time.

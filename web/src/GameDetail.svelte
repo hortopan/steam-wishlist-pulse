@@ -4,10 +4,20 @@
   import { api, AuthError } from "./api";
   import { timeAgo } from "./utils";
   import { POLL_INTERVAL, TICK_INTERVAL, FLASH_DURATION, FLASH_ROW_DURATION, METRIC_KEYS } from "./constants";
-  import type { GameReport, GameDetailResponse, CountryEntry } from "./types";
+  import type {
+    CountryEntry,
+    GameReport,
+    GameDetailResponse,
+    ChartResponse,
+    ChartPoint,
+    PaginatedHistoryResponse,
+    HistoryEntry,
+    SnapshotCountriesResponse,
+  } from "./types";
   import Chart from "./Chart.svelte";
 
   function countryFlag(code: string): string {
+    if (!code || !/^[a-zA-Z]{2}$/.test(code)) return "";
     return [...code.toUpperCase()].map(c => String.fromCodePoint(0x1F1E6 + c.charCodeAt(0) - 65)).join("");
   }
 
@@ -21,41 +31,73 @@
     onLogout: () => void;
   } = $props();
 
-  let data = $state<GameDetailResponse | null>(null);
+  // ── State ──────────────────────────────────────────────────────
+  let detail = $state<GameDetailResponse | null>(null);
+  let chartData = $state<ChartResponse | null>(null);
+  let historyData = $state<PaginatedHistoryResponse | null>(null);
   let loading = $state(true);
   let error = $state<string | null>(null);
   let now = $state(Date.now());
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
   let tickTimer: ReturnType<typeof setInterval> | null = null;
+  let abortController: AbortController | null = null;
+  let chartAbortController: AbortController | null = null;
+  let destroyed = false;
 
-  // Pagination: show latest N entries at a time
-  const PAGE_SIZE = 24;
-  let visibleCount = $state(PAGE_SIZE);
+  // Chart range
+  type ChartRange = "1d" | "2d" | "3d" | "7d" | "1m" | "3m" | "1y" | "5y";
+  const CHART_RANGES: { key: ChartRange; label: string }[] = [
+    { key: "1d", label: "1D" },
+    { key: "2d", label: "2D" },
+    { key: "3d", label: "3D" },
+    { key: "7d", label: "7D" },
+    { key: "1m", label: "1M" },
+    { key: "3m", label: "3M" },
+    { key: "1y", label: "1Y" },
+    { key: "5y", label: "5Y" },
+  ];
+  let chartRange = $state<ChartRange>("7d");
+
+  // History pagination
+  let historyPage = $state(1);
+  const HISTORY_PAGE_SIZE = 24;
+  let historyLoading = $state(false);
+  let chartLoading = $state(false);
+
+  // Country lazy-loading
+  let expandedCountries = $state<Map<number, CountryEntry[]>>(new Map());
+  let loadingCountries = $state<Set<number>>(new Set());
 
   // Animation: track which stats changed on last poll
   let flashMetrics = $state<Set<string>>(new Set());
   let flashRows = $state<Set<string>>(new Set());
   let prevLatest: GameReport | null = null;
-  let prevHistoryCount = 0;
+  let prevHistoryIds = new Set<number>();
 
   function schedulePoll() {
     pollTimer = setTimeout(async () => {
-      await fetchData();
+      await fetchDetail();
       schedulePoll();
     }, POLL_INTERVAL);
   }
 
-  async function fetchData() {
-    if (!data) loading = true;
+  // ── Fetch functions ────────────────────────────────────────────
+
+  async function fetchDetail() {
+    if (!detail) loading = true;
     error = null;
+    abortController?.abort();
+    abortController = new AbortController();
+    const { signal } = abortController;
     try {
-      const newData = await api<GameDetailResponse>(`/wishlist/${appId}`);
+      const newDetail = await api<GameDetailResponse>(`/wishlist/${appId}/detail`, { signal });
+      if (destroyed) return;
 
       // Detect changed metrics for flash animation
-      if (prevLatest && newData.latest) {
+      if (prevLatest && newDetail.latest) {
         const changed = new Set<string>();
         for (const key of METRIC_KEYS) {
-          if ((newData.latest as any)[key] !== (prevLatest as any)[key]) {
+          if ((newDetail.latest as any)[key] !== (prevLatest as any)[key]) {
             changed.add(key);
           }
         }
@@ -66,20 +108,18 @@
         }
       }
 
-      // Detect new history rows
-      if (newData.history.length > prevHistoryCount && prevHistoryCount > 0) {
-        const newDates = new Set<string>();
-        for (let i = prevHistoryCount; i < newData.history.length; i++) {
-          newDates.add(newData.history[i].date);
-        }
-        flashRows = newDates;
-        setTimeout(() => (flashRows = new Set()), FLASH_ROW_DURATION);
-      }
+      if (newDetail.latest) prevLatest = { ...newDetail.latest };
+      detail = newDetail;
 
-      if (newData.latest) prevLatest = { ...newData.latest };
-      prevHistoryCount = newData.history.length;
-      data = newData;
+      // Refresh chart and first page of history on each poll
+      chartAbortController?.abort();
+      chartAbortController = new AbortController();
+      await Promise.all([
+        fetchChart(chartRange, chartAbortController.signal),
+        historyPage === 1 ? fetchHistory(1, signal) : Promise.resolve(),
+      ]);
     } catch (e: any) {
+      if (signal.aborted) return;
       if (e instanceof AuthError) { onLogout(); return; }
       error = e.message;
     } finally {
@@ -87,8 +127,95 @@
     }
   }
 
+  async function fetchChart(range: ChartRange, signal?: AbortSignal) {
+    chartLoading = true;
+    try {
+      const data = await api<ChartResponse>(`/wishlist/${appId}/chart?range=${range}`, { signal });
+      if (destroyed) return;
+      // Only apply if the range still matches what the user selected
+      if (range === chartRange) chartData = data;
+    } catch (e: any) {
+      if (signal?.aborted) return;
+      if (e instanceof AuthError) { onLogout(); return; }
+      // Chart errors are non-fatal, keep old data
+    } finally {
+      chartLoading = false;
+    }
+  }
+
+  async function fetchHistory(page: number, signal?: AbortSignal) {
+    historyLoading = true;
+    try {
+      const newHistory = await api<PaginatedHistoryResponse>(
+        `/wishlist/${appId}/history?page=${page}&per_page=${HISTORY_PAGE_SIZE}`,
+        { signal },
+      );
+      if (destroyed) return;
+
+      // Detect new rows for flash animation
+      if (page === 1 && historyData) {
+        const newDates = new Set<string>();
+        for (const entry of newHistory.entries) {
+          if (!prevHistoryIds.has(entry.snapshot_id)) {
+            newDates.add(entry.date);
+          }
+        }
+        if (newDates.size > 0) {
+          flashRows = newDates;
+          setTimeout(() => (flashRows = new Set()), FLASH_ROW_DURATION);
+        }
+      }
+
+      prevHistoryIds = new Set(newHistory.entries.map(e => e.snapshot_id));
+      historyData = newHistory;
+      historyPage = page;
+    } catch (e: any) {
+      if (signal?.aborted) return;
+      if (e instanceof AuthError) { onLogout(); return; }
+      error = e.message;
+    } finally {
+      historyLoading = false;
+    }
+  }
+
+  async function loadCountries(snapshotId: number) {
+    if (expandedCountries.has(snapshotId)) {
+      // Toggle off
+      const next = new Map(expandedCountries);
+      next.delete(snapshotId);
+      expandedCountries = next;
+      return;
+    }
+
+    const nextLoading = new Set(loadingCountries);
+    nextLoading.add(snapshotId);
+    loadingCountries = nextLoading;
+
+    try {
+      const resp = await api<SnapshotCountriesResponse>(
+        `/wishlist/${appId}/countries/${snapshotId}`
+      );
+      const next = new Map(expandedCountries);
+      next.set(snapshotId, resp.countries);
+      expandedCountries = next;
+    } catch (e: any) {
+      if (e instanceof AuthError) { onLogout(); return; }
+    } finally {
+      const nextLoading = new Set(loadingCountries);
+      nextLoading.delete(snapshotId);
+      loadingCountries = nextLoading;
+    }
+  }
+
+  async function changeChartRange(range: ChartRange) {
+    chartRange = range;
+    chartAbortController?.abort();
+    chartAbortController = new AbortController();
+    await fetchChart(range, chartAbortController.signal);
+  }
+
   onMount(() => {
-    fetchData();
+    fetchDetail();
     schedulePoll();
     tickTimer = setInterval(() => {
       now = Date.now();
@@ -96,6 +223,9 @@
   });
 
   onDestroy(() => {
+    destroyed = true;
+    abortController?.abort();
+    chartAbortController?.abort();
     if (pollTimer) clearTimeout(pollTimer);
     if (tickTimer) clearInterval(tickTimer);
   });
@@ -118,55 +248,66 @@
   {#if error}
     <div class="error-banner">
       <span>Error: {error}</span>
-      <button onclick={fetchData}>Retry</button>
+      <button onclick={fetchDetail}>Retry</button>
     </div>
   {/if}
 
-  {#if loading && !data}
+  {#if loading && !detail}
     <div class="loading">
       <div class="spinner"></div>
     </div>
-  {:else if data}
+  {:else if detail}
     <!-- Hero Section -->
     <div class="hero">
-      {#if data.image_url}
-        <img class="hero-image" src={data.image_url} alt={data.name} />
+      {#if detail.image_url}
+        <img class="hero-image" src={detail.image_url} alt={detail.name} />
       {/if}
       <div class="hero-overlay">
-        <h1 class="hero-title">{data.name}</h1>
-        <span class="hero-appid">App ID: {data.app_id}</span>
-        {#if data.latest?.changed_at}
+        <h1 class="hero-title">{detail.name}</h1>
+        <span class="hero-appid">App ID: {detail.app_id}</span>
+        {#if detail.latest?.changed_at}
           <span class="hero-updated"
-            >Last updated {timeAgo(data.latest.changed_at, now)}</span
+            >Last updated {timeAgo(detail.latest.changed_at, now)}</span
           >
         {/if}
         <div class="hero-links">
-          <a href={`https://store.steampowered.com/app/${data.app_id}`} target="_blank" rel="noopener noreferrer" class="hero-link">
+          <a href={`https://store.steampowered.com/app/${detail.app_id}`} target="_blank" rel="noopener noreferrer" class="hero-link">
             <svg width="14" height="14" viewBox="0 0 20 20" fill="none"><path d="M11 3H17V9" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M17 3L9 11" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M15 11V16C15 16.5523 14.5523 17 14 17H4C3.44772 17 3 16.5523 3 16V6C3 5.44772 3.44772 5 4 5H9" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
             Store Page
           </a>
-          <a href={`https://partner.steamgames.com/apps/landing/${data.app_id}`} target="_blank" rel="noopener noreferrer" class="hero-link">
+          <a href={`https://partner.steamgames.com/apps/landing/${detail.app_id}`} target="_blank" rel="noopener noreferrer" class="hero-link">
             <svg width="14" height="14" viewBox="0 0 20 20" fill="none"><path d="M11 3H17V9" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M17 3L9 11" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M15 11V16C15 16.5523 14.5523 17 14 17H4C3.44772 17 3 16.5523 3 16V6C3 5.44772 3.44772 5 4 5H9" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
             Steamworks
           </a>
-
         </div>
       </div>
     </div>
 
     <!-- Stats Cards -->
-    {#if data.latest}
+    {#if detail.latest}
       <div class="stats-row">
         <div class="stat-card stat-adds" class:flash={flashMetrics.has("adds")}>
-          <div class="stat-big-value">{data.latest.adds.toLocaleString()}</div>
+          <div class="stat-section-today">
+            <div class="stat-period-label">Today</div>
+            <div class="stat-big-value">{detail.latest.adds.toLocaleString()}</div>
+          </div>
+          <div class="stat-section-total">
+            <div class="stat-period-label">All-Time</div>
+            <div class="stat-total-value">{detail.latest.total_adds.toLocaleString()}</div>
+          </div>
           <div class="stat-big-label">Wishlist Adds</div>
         </div>
         <div
           class="stat-card stat-deletes"
           class:flash={flashMetrics.has("deletes")}
         >
-          <div class="stat-big-value">
-            {data.latest.deletes.toLocaleString()}
+          <div class="stat-section-today">
+            <div class="stat-period-label">Today</div>
+            <div class="stat-big-value">{detail.latest.deletes.toLocaleString()}</div>
+          </div>
+          <div class="stat-section-total">
+            <div class="stat-period-label">All-Time</div>
+            <div class="stat-total-value">{detail.latest.total_deletes.toLocaleString()}</div>
           </div>
           <div class="stat-big-label">Wishlist Deletes</div>
         </div>
@@ -174,8 +315,13 @@
           class="stat-card stat-purchases"
           class:flash={flashMetrics.has("purchases")}
         >
-          <div class="stat-big-value">
-            {data.latest.purchases.toLocaleString()}
+          <div class="stat-section-today">
+            <div class="stat-period-label">Today</div>
+            <div class="stat-big-value">{detail.latest.purchases.toLocaleString()}</div>
+          </div>
+          <div class="stat-section-total">
+            <div class="stat-period-label">All-Time</div>
+            <div class="stat-total-value">{detail.latest.total_purchases.toLocaleString()}</div>
           </div>
           <div class="stat-big-label">Purchases</div>
         </div>
@@ -183,16 +329,23 @@
           class="stat-card stat-gifts"
           class:flash={flashMetrics.has("gifts")}
         >
-          <div class="stat-big-value">{data.latest.gifts.toLocaleString()}</div>
+          <div class="stat-section-today">
+            <div class="stat-period-label">Today</div>
+            <div class="stat-big-value">{detail.latest.gifts.toLocaleString()}</div>
+          </div>
+          <div class="stat-section-total">
+            <div class="stat-period-label">All-Time</div>
+            <div class="stat-total-value">{detail.latest.total_gifts.toLocaleString()}</div>
+          </div>
           <div class="stat-big-label">Gifts</div>
         </div>
       </div>
 
       <!-- Platform Breakdown -->
-      {@const totalPlatform = data.latest.adds_windows + data.latest.adds_mac + data.latest.adds_linux}
-      {@const pctWin = totalPlatform ? (data.latest.adds_windows / totalPlatform) * 100 : 0}
-      {@const pctMac = totalPlatform ? (data.latest.adds_mac / totalPlatform) * 100 : 0}
-      {@const pctLinux = totalPlatform ? (data.latest.adds_linux / totalPlatform) * 100 : 0}
+      {@const totalPlatform = detail.latest.adds_windows + detail.latest.adds_mac + detail.latest.adds_linux}
+      {@const pctWin = totalPlatform ? (detail.latest.adds_windows / totalPlatform) * 100 : 0}
+      {@const pctMac = totalPlatform ? (detail.latest.adds_mac / totalPlatform) * 100 : 0}
+      {@const pctLinux = totalPlatform ? (detail.latest.adds_linux / totalPlatform) * 100 : 0}
       {#if totalPlatform > 0}
         <div class="platform-section">
           <h3 class="section-subtitle">Adds by Platform</h3>
@@ -203,16 +356,16 @@
               {#if pctLinux > 0}<div class="platform-segment seg-linux" style="width:{pctLinux}%"></div>{/if}
             </div>
             <div class="platform-legend">
-              <span class="legend-item"><span class="legend-dot dot-windows"></span> Windows {data.latest.adds_windows.toLocaleString()} ({pctWin.toFixed(1)}%)</span>
-              <span class="legend-item"><span class="legend-dot dot-mac"></span> macOS {data.latest.adds_mac.toLocaleString()} ({pctMac.toFixed(1)}%)</span>
-              <span class="legend-item"><span class="legend-dot dot-linux"></span> Linux {data.latest.adds_linux.toLocaleString()} ({pctLinux.toFixed(1)}%)</span>
+              <span class="legend-item"><span class="legend-dot dot-windows"></span> Windows {detail.latest.adds_windows.toLocaleString()} ({pctWin.toFixed(1)}%)</span>
+              <span class="legend-item"><span class="legend-dot dot-mac"></span> macOS {detail.latest.adds_mac.toLocaleString()} ({pctMac.toFixed(1)}%)</span>
+              <span class="legend-item"><span class="legend-dot dot-linux"></span> Linux {detail.latest.adds_linux.toLocaleString()} ({pctLinux.toFixed(1)}%)</span>
             </div>
           </div>
         </div>
       {/if}
 
       <!-- Net Change -->
-      {@const net = data.latest.adds - data.latest.deletes}
+      {@const net = detail.latest.adds - detail.latest.deletes}
       <div class="net-row" class:flash-net={flashMetrics.size > 0}>
         <span class="net-label">Net Wishlist Change Today</span>
         <span
@@ -229,17 +382,16 @@
       </div>
     {/if}
 
-    <!-- Chart + History use paginated slice (latest N entries) -->
-    {@const visibleHistory = data.history.length > visibleCount ? data.history.slice(data.history.length - visibleCount) : data.history}
-
-    <!-- Chart -->
-    <Chart history={visibleHistory} />
+    <!-- Chart with range selector -->
+    {#if chartData}
+      <Chart history={chartData.points} resolution={chartData.resolution} {chartRange} onRangeChange={changeChartRange} ranges={CHART_RANGES} loading={chartLoading} />
+    {/if}
 
     <!-- Top Countries (latest snapshot) -->
-    {#if data.latest && data.latest.countries.length > 0}
-      {@const sortedCountries = [...data.latest.countries].sort((a, b) => b.adds - a.adds)}
+    {#if detail.latest && detail.latest.countries.length > 0}
+      {@const sortedCountries = [...detail.latest.countries].sort((a, b) => b.adds - a.adds)}
       <div class="countries-section">
-        <h2>Top Countries for today <span class="muted-count">({data.latest.countries.length} total)</span></h2>
+        <h2>Top Countries for today <span class="muted-count">({detail.latest.countries.length} total)</span></h2>
         <div class="countries-table-wrap">
           <table class="history-table">
             <thead>
@@ -267,10 +419,10 @@
       </div>
     {/if}
 
-    <!-- Snapshot History Table -->
-    {#if data.history.length > 0}
+    <!-- Snapshot History Table (server-paginated) -->
+    {#if historyData && historyData.entries.length > 0}
       <div class="history-section">
-        <h2>Snapshot History <span class="muted-count">({data.history.length} total{data.history.length > visibleCount ? `, showing latest ${visibleCount}` : ""})</span></h2>
+        <h2>Snapshot History <span class="muted-count">({historyData.total} total, page {historyData.page})</span></h2>
         <div class="history-table-wrap">
           <table class="history-table">
             <thead>
@@ -284,14 +436,22 @@
                 <th class="num platform-col">Mac</th>
                 <th class="num platform-col">Linux</th>
                 <th>Recorded</th>
+                <th class="num">Countries</th>
               </tr>
             </thead>
             <tbody>
-              {#each [...visibleHistory].reverse() as entry}
+              {#each historyData.entries as entry}
                 <tr class:flash-row={flashRows.has(entry.date)} class:anomaly-row={entry.is_anomaly}>
                   <td>
                     {#if entry.is_anomaly}<span class="anomaly-badge" title="Anomalous change detected">&#9888;</span>{/if}
                     {entry.date.split("T")[0]}
+                    {#if entry.is_anomaly && entry.anomaly_metrics?.descriptions?.length}
+                      <div class="anomaly-detail">
+                        {#each entry.anomaly_metrics.descriptions as desc}
+                          <div class="anomaly-detail-line">{desc}</div>
+                        {/each}
+                      </div>
+                    {/if}
                   </td>
                   <td class="num adds">{entry.adds.toLocaleString()}</td>
                   <td class="num deletes">{entry.deletes.toLocaleString()}</td>
@@ -305,17 +465,68 @@
                       ? timeAgo(entry.fetched_at, now)
                       : "—"}</td
                   >
+                  <td class="num">
+                    <button
+                      class="country-expand-btn"
+                      class:loading-spin={loadingCountries.has(entry.snapshot_id)}
+                      onclick={() => loadCountries(entry.snapshot_id)}
+                      title={expandedCountries.has(entry.snapshot_id) ? "Hide countries" : "Show countries"}
+                    >
+                      {#if loadingCountries.has(entry.snapshot_id)}
+                        <span class="mini-spinner"></span>
+                      {:else if expandedCountries.has(entry.snapshot_id)}
+                        ▲
+                      {:else}
+                        ▼
+                      {/if}
+                    </button>
+                  </td>
                 </tr>
+                {#if expandedCountries.has(entry.snapshot_id)}
+                  {@const countries = expandedCountries.get(entry.snapshot_id) ?? []}
+                  {@const sorted = [...countries].sort((a, b) => b.adds - a.adds)}
+                  <tr class="country-detail-row">
+                    <td colspan="10">
+                      <div class="country-detail-grid">
+                        {#each sorted.slice(0, 20) as c}
+                          <div class="country-mini">
+                            <span class="country-flag">{countryFlag(c.country_code)}</span>
+                            <span class="country-code">{c.country_code}</span>
+                            <span class="country-val adds">+{c.adds}</span>
+                            <span class="country-val deletes">-{c.deletes}</span>
+                          </div>
+                        {/each}
+                        {#if countries.length > 20}
+                          <div class="country-mini muted">+{countries.length - 20} more</div>
+                        {/if}
+                      </div>
+                    </td>
+                  </tr>
+                {/if}
               {/each}
             </tbody>
           </table>
         </div>
-        {#if data.history.length > visibleCount}
-          <button class="load-more-btn" onclick={() => visibleCount += PAGE_SIZE}>
-            Show {Math.min(PAGE_SIZE, data.history.length - visibleCount)} more entries
-            <span class="load-more-remaining">({data.history.length - visibleCount} remaining)</span>
+        <!-- Pagination controls -->
+        <div class="pagination-row">
+          <button
+            class="pagination-btn"
+            disabled={historyPage <= 1 || historyLoading}
+            onclick={() => fetchHistory(historyPage - 1)}
+          >
+            &larr; Newer
           </button>
-        {/if}
+          <span class="pagination-info">
+            Page {historyData.page} of {Math.ceil(historyData.total / historyData.per_page)}
+          </span>
+          <button
+            class="pagination-btn"
+            disabled={historyPage * historyData.per_page >= historyData.total || historyLoading}
+            onclick={() => fetchHistory(historyPage + 1)}
+          >
+            Older &rarr;
+          </button>
+        </div>
       </div>
     {/if}
   {/if}
@@ -522,11 +733,38 @@
   }
 
   .stat-big-label {
-    font-size: 0.75rem;
+    font-size: 0.7rem;
     color: var(--text-muted);
     text-transform: uppercase;
     letter-spacing: 0.05em;
-    margin-top: 0.35rem;
+    margin-top: 0.75rem;
+    padding-top: 0.5rem;
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+    text-align: center;
+  }
+
+  .stat-section-today {
+    margin-bottom: 0.5rem;
+  }
+
+  .stat-section-total {
+    opacity: 0.6;
+  }
+
+  .stat-period-label {
+    font-size: 0.6rem;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 0.15rem;
+  }
+
+  .stat-total-value {
+    font-size: 1rem;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.2;
+    color: var(--text-secondary);
   }
 
   .stat-adds .stat-big-value {
@@ -774,31 +1012,14 @@
     cursor: help;
   }
 
-  .load-more-btn {
-    display: block;
-    width: 100%;
-    margin-top: 1rem;
-    padding: 0.7rem 1rem;
-    background: rgba(99, 102, 241, 0.1);
-    border: 1px solid var(--accent);
-    border-radius: 0.5rem;
-    color: var(--accent);
-    font-size: 0.85rem;
-    font-weight: 500;
-    cursor: pointer;
-    transition: background 0.2s, color 0.2s;
+  .anomaly-detail {
+    margin-top: 0.2rem;
   }
 
-  .load-more-btn:hover {
-    background: rgba(99, 102, 241, 0.2);
-    color: var(--text);
-  }
-
-  .load-more-remaining {
-    color: var(--text-muted);
-    font-weight: 400;
-    font-size: 0.8rem;
-    margin-left: 0.25rem;
+  .anomaly-detail-line {
+    font-size: 0.75rem;
+    color: var(--red);
+    opacity: 0.85;
   }
 
   .history-table tbody tr:hover {
@@ -834,6 +1055,107 @@
       opacity: 1;
       transform: translateY(0);
     }
+  }
+
+  /* Country expand button */
+  .country-expand-btn {
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    padding: 0.2rem 0.5rem;
+    border-radius: 0.25rem;
+    cursor: pointer;
+    font-size: 0.7rem;
+    transition: border-color 0.2s, color 0.2s;
+  }
+
+  .country-expand-btn:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+
+  .mini-spinner {
+    display: inline-block;
+    width: 0.7rem;
+    height: 0.7rem;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.6s linear infinite;
+  }
+
+  /* Inline country detail */
+  .country-detail-row td {
+    padding: 0.5rem 0.75rem;
+    background: rgba(99, 102, 241, 0.03);
+  }
+
+  .country-detail-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+
+  .country-mini {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    font-size: 0.75rem;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    padding: 0.2rem 0.5rem;
+    border-radius: 0.25rem;
+  }
+
+  .country-code {
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  .country-val.adds {
+    color: var(--green);
+  }
+
+  .country-val.deletes {
+    color: var(--red);
+  }
+
+  /* Pagination */
+  .pagination-row {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 1rem;
+    margin-top: 1rem;
+    padding-top: 0.75rem;
+  }
+
+  .pagination-btn {
+    background: rgba(99, 102, 241, 0.1);
+    border: 1px solid var(--accent);
+    border-radius: 0.5rem;
+    color: var(--accent);
+    font-size: 0.85rem;
+    font-weight: 500;
+    cursor: pointer;
+    padding: 0.5rem 1rem;
+    transition: background 0.2s, color 0.2s;
+  }
+
+  .pagination-btn:hover:not(:disabled) {
+    background: rgba(99, 102, 241, 0.2);
+    color: var(--text);
+  }
+
+  .pagination-btn:disabled {
+    opacity: 0.3;
+    cursor: not-allowed;
+  }
+
+  .pagination-info {
+    font-size: 0.8rem;
+    color: var(--text-muted);
   }
 
   /* Responsive */

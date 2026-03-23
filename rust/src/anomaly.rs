@@ -33,6 +33,7 @@ impl RateField {
 }
 
 /// Per-metric anomaly detail.
+#[allow(dead_code)]
 pub struct MetricAnomaly {
     pub name: &'static str,
     /// Raw delta between current and previous snapshot (for display).
@@ -47,6 +48,7 @@ pub struct MetricAnomaly {
 }
 
 /// Country-level anomaly detail.
+#[allow(dead_code)]
 pub struct CountryAnomaly {
     pub country_code: String,
     pub metric: &'static str,
