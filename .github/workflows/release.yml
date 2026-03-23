@@ -200,8 +200,10 @@ jobs:
                 echo "Repackaging: $archive"
                 rm "$archive"
                 tar -C target/distrib -cJf "$archive" "$dirname"
-                # Update the sha256
-                shasum -a 256 "$archive" | awk '{print $1}' > "${archive}.sha256"
+                # Update the sha256 file — this is what dist uses to generate the Homebrew formula
+                new_sha=$(shasum -a 256 "$archive" | awk '{print $1}')
+                echo "$new_sha" > "${archive}.sha256"
+                echo "Updated checksum for $archive: $new_sha"
               fi
             fi
           done
