@@ -130,7 +130,7 @@ Optional, if you want bot notifications:
 #### Shell script (macOS / Linux)
 
 ```bash
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/hortopan/steam-wishlist-pulse/releases/download/v0.1.2/wishlist-pulse-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/hortopan/steam-wishlist-pulse/releases/download/v0.1.3/wishlist-pulse-installer.sh | sh
 ```
 
 #### Homebrew
