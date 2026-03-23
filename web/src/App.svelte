@@ -17,6 +17,7 @@
   let soundEnabled = $state(isSoundEnabled());
   let hasHealthIssue = $state(false);
   let appVersion = $state<string | null>(null);
+  let latestVersion = $state<string | null>(null);
   let unsubHealth: (() => void) | null = null;
 
   function toggleSound() {
@@ -43,6 +44,7 @@
       const data = await res.json();
 
       if (data.version) appVersion = data.version;
+      if (data.latest_version) latestVersion = data.latest_version;
       if (data.setup_required) {
         view = 'setup';
       } else if (data.authenticated) {
@@ -179,7 +181,12 @@
 {/if}
 
 {#if appVersion}
-  <footer class="app-footer"><a href="https://github.com/hortopan/steam-wishlist-pulse" target="_blank" rel="noopener noreferrer">Wishlist Pulse</a> v{appVersion}</footer>
+  <footer class="app-footer">
+    <a href="https://github.com/hortopan/steam-wishlist-pulse" target="_blank" rel="noopener noreferrer">Wishlist Pulse</a> v{appVersion}
+    {#if latestVersion}
+      <a href="https://github.com/hortopan/steam-wishlist-pulse/releases/latest" target="_blank" rel="noopener noreferrer" class="update-badge">Update available: v{latestVersion}</a>
+    {/if}
+  </footer>
 {/if}
 
 <style>
@@ -200,6 +207,24 @@
 
   .app-footer a:hover {
     color: var(--accent);
+  }
+
+  .update-badge {
+    display: inline-block;
+    margin-left: 0.5rem;
+    padding: 0.15rem 0.5rem;
+    font-size: 0.7rem;
+    background: var(--accent);
+    color: var(--bg, #1a1a2e) !important;
+    border-radius: 999px;
+    text-decoration: none !important;
+    opacity: 1;
+    font-weight: 600;
+    transition: opacity 0.2s;
+  }
+
+  .update-badge:hover {
+    opacity: 0.85;
   }
   .app-header {
     display: flex;

@@ -57,6 +57,14 @@ async fn main() {
     // Build shared application state
     let app_state = AppState::new(db, steam, config.insecure, config.auto_populate_days);
 
+    // Kick off version check so the cache is warm before the first request
+    {
+        let state = app_state.clone();
+        tokio::spawn(async move {
+            state.get_latest_version().await;
+        });
+    }
+
     // Auto-populate historical data on startup
     if config.auto_populate_days > 0 {
         let state = app_state.clone();

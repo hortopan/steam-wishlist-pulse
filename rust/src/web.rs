@@ -130,6 +130,7 @@ pub struct AppState {
     cached_jwt_secret: Arc<tokio::sync::Mutex<Option<String>>>,
     insecure: bool,
     pub auto_populate_days: u32,
+    latest_version: Arc<tokio::sync::Mutex<Option<(String, Instant)>>>,
 }
 
 impl AppState {
@@ -146,6 +147,7 @@ impl AppState {
             cached_jwt_secret: Arc::new(tokio::sync::Mutex::new(None)),
             insecure,
             auto_populate_days,
+            latest_version: Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
 
@@ -157,6 +159,66 @@ impl AppState {
             .flatten()
             .and_then(|v| v.parse().ok())
             .unwrap_or(DEFAULT_RETENTION_DAYS)
+    }
+
+    /// Return the latest known version from cache. If the cache is stale or empty,
+    /// spawn a background task to refresh it — never block the caller.
+    pub async fn get_latest_version(&self) -> Option<String> {
+        const CACHE_DURATION: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+        let cached = self.latest_version.lock().await;
+        let stale = match *cached {
+            Some((_, ref fetched_at)) => fetched_at.elapsed() >= CACHE_DURATION,
+            None => true,
+        };
+        let current = cached.as_ref().map(|(v, _)| v.clone());
+        drop(cached);
+
+        if stale {
+            let cache = Arc::clone(&self.latest_version);
+            tokio::spawn(async move {
+                if let Some(version) = Self::fetch_latest_github_version().await {
+                    let current_version = env!("CARGO_PKG_VERSION");
+                    if version != current_version {
+                        use colored::Colorize;
+                        println!(
+                            "\n  {} {} → {} {}\n",
+                            "UPDATE AVAILABLE:".bold().yellow(),
+                            format!("v{current_version}").dimmed(),
+                            format!("v{version}").green().bold(),
+                            "https://github.com/hortopan/steam-wishlist-pulse/releases/latest".cyan().underline()
+                        );
+                    }
+                    *cache.lock().await = Some((version, Instant::now()));
+                }
+            });
+        }
+
+        current
+    }
+
+    async fn fetch_latest_github_version() -> Option<String> {
+        #[derive(Deserialize)]
+        struct GithubRelease {
+            tag_name: String,
+        }
+
+        let client = reqwest::Client::builder()
+            .user_agent("wishlist-pulse")
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .ok()?;
+
+        let release: GithubRelease = client
+            .get("https://api.github.com/repos/hortopan/steam-wishlist-pulse/releases/latest")
+            .send()
+            .await
+            .ok()?
+            .json()
+            .await
+            .ok()?;
+
+        Some(release.tag_name.trim_start_matches('v').to_string())
     }
 
     /// Get or create the JWT signing secret (cached to avoid DB hits on every request).
@@ -402,6 +464,8 @@ struct AuthStatus {
     access_level: Option<AccessLevel>,
     setup_required: bool,
     version: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    latest_version: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -578,11 +642,15 @@ async fn api_auth_status(State(state): State<AppState>, jar: CookieJar) -> Json<
     let setup_required = !state.passwords_configured().await;
     let session = state.get_session(&jar).await;
 
+    let current_version = env!("CARGO_PKG_VERSION");
+    let latest_version = state.get_latest_version().await.filter(|v| v != current_version);
+
     Json(AuthStatus {
         authenticated: session.is_some(),
         access_level: session.map(|s| s.access_level),
         setup_required,
-        version: env!("CARGO_PKG_VERSION"),
+        version: current_version,
+        latest_version,
     })
 }
 
