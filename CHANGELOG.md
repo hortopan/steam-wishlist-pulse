@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.5] - 2026-03-24
+
+### Bug Fixes
+
+- Issue with db and docs
+
+### Version Bumps
+
+- Version
+
 ## [0.1.4] - 2026-03-24
 
 ### Features
