@@ -2,7 +2,7 @@
   import { onMount, onDestroy } from "svelte";
   import { playNotificationSound } from "./notificationSound";
   import { api, AuthError } from "./api";
-  import { timeAgo, formatDate } from "./utils";
+  import { timeAgo, formatDate, isTodayPacific } from "./utils";
   import { POLL_INTERVAL, TICK_INTERVAL, FLASH_DURATION } from "./constants";
   import type { GameReport } from "./types";
 
@@ -127,6 +127,7 @@
 {:else}
   <div class="grid">
     {#each games as game}
+      {@const hasToday = isTodayPacific(game.date)}
       <div
         class="card clickable"
         class:flash={flashCards.has(game.app_id)}
@@ -188,24 +189,28 @@
           </div>
           <div class="section-divider"></div>
           <div class="stats-section-label">Today</div>
-          <div class="stats">
-            <div class="stat stat-adds">
-              <span class="stat-label">Adds</span>
-              <span class="stat-value">{game.adds.toLocaleString()}</span>
+          {#if hasToday}
+            <div class="stats">
+              <div class="stat stat-adds">
+                <span class="stat-label">Adds</span>
+                <span class="stat-value">{game.adds.toLocaleString()}</span>
+              </div>
+              <div class="stat stat-deletes">
+                <span class="stat-label">Deletes</span>
+                <span class="stat-value">{game.deletes.toLocaleString()}</span>
+              </div>
+              <div class="stat stat-purchases">
+                <span class="stat-label">Purchases</span>
+                <span class="stat-value">{game.purchases.toLocaleString()}</span>
+              </div>
+              <div class="stat stat-gifts">
+                <span class="stat-label">Gifts</span>
+                <span class="stat-value">{game.gifts.toLocaleString()}</span>
+              </div>
             </div>
-            <div class="stat stat-deletes">
-              <span class="stat-label">Deletes</span>
-              <span class="stat-value">{game.deletes.toLocaleString()}</span>
-            </div>
-            <div class="stat stat-purchases">
-              <span class="stat-label">Purchases</span>
-              <span class="stat-value">{game.purchases.toLocaleString()}</span>
-            </div>
-            <div class="stat stat-gifts">
-              <span class="stat-label">Gifts</span>
-              <span class="stat-value">{game.gifts.toLocaleString()}</span>
-            </div>
-          </div>
+          {:else}
+            <div class="no-today-banner">No data from Steam yet today</div>
+          {/if}
         </div>
       </div>
     {/each}
@@ -393,6 +398,16 @@
     font-weight: 700;
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
+  }
+
+  .no-today-banner {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    text-align: center;
+    padding: 0.6rem 0.75rem;
+    border-radius: 0.5rem;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px dashed var(--border);
   }
 
   .stat-label {

@@ -19,6 +19,20 @@ export function formatDate(iso: string): string {
   return isNaN(d.getTime()) ? '' : dtf.format(d);
 }
 
+/** Check whether an ISO date string falls on "today" in US/Pacific (Steam's reporting TZ). */
+export function isTodayPacific(iso: string): boolean {
+  if (!iso) return false;
+  const pacific = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Los_Angeles',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  });
+  const snapshotDate = iso.slice(0, 10); // "YYYY-MM-DD"
+  const todayDate = pacific.format(new Date()); // "YYYY-MM-DD" (en-CA uses this format)
+  return snapshotDate === todayDate;
+}
+
 export function formatNumber(n: number): string {
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
   if (n >= 1_000) return (n / 1_000).toFixed(1) + 'K';

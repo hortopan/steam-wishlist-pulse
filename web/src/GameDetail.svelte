@@ -2,7 +2,7 @@
   import { onMount, onDestroy } from "svelte";
   import { playNotificationSound } from "./notificationSound";
   import { api, AuthError } from "./api";
-  import { timeAgo } from "./utils";
+  import { timeAgo, isTodayPacific } from "./utils";
   import { POLL_INTERVAL, TICK_INTERVAL, FLASH_DURATION, FLASH_ROW_DURATION, METRIC_KEYS } from "./constants";
   import type {
     CountryEntry,
@@ -295,11 +295,15 @@
 
     <!-- Stats Cards -->
     {#if detail.latest}
+      {@const hasToday = isTodayPacific(detail.latest.date)}
+      {#if !hasToday}
+        <div class="no-today-banner">No data from Steam yet today — showing all-time totals only</div>
+      {/if}
       <div class="stats-row">
         <div class="stat-card stat-adds" class:flash={flashMetrics.has("adds")}>
           <div class="stat-section-today">
             <div class="stat-period-label">Today</div>
-            <div class="stat-big-value">{detail.latest.adds.toLocaleString()}</div>
+            <div class="stat-big-value">{hasToday ? detail.latest.adds.toLocaleString() : "—"}</div>
           </div>
           <div class="stat-section-total">
             <div class="stat-period-label">All-Time</div>
@@ -313,7 +317,7 @@
         >
           <div class="stat-section-today">
             <div class="stat-period-label">Today</div>
-            <div class="stat-big-value">{detail.latest.deletes.toLocaleString()}</div>
+            <div class="stat-big-value">{hasToday ? detail.latest.deletes.toLocaleString() : "—"}</div>
           </div>
           <div class="stat-section-total">
             <div class="stat-period-label">All-Time</div>
@@ -327,7 +331,7 @@
         >
           <div class="stat-section-today">
             <div class="stat-period-label">Today</div>
-            <div class="stat-big-value">{detail.latest.purchases.toLocaleString()}</div>
+            <div class="stat-big-value">{hasToday ? detail.latest.purchases.toLocaleString() : "—"}</div>
           </div>
           <div class="stat-section-total">
             <div class="stat-period-label">All-Time</div>
@@ -341,7 +345,7 @@
         >
           <div class="stat-section-today">
             <div class="stat-period-label">Today</div>
-            <div class="stat-big-value">{detail.latest.gifts.toLocaleString()}</div>
+            <div class="stat-big-value">{hasToday ? detail.latest.gifts.toLocaleString() : "—"}</div>
           </div>
           <div class="stat-section-total">
             <div class="stat-period-label">All-Time</div>
@@ -398,7 +402,7 @@
     {/if}
 
     <!-- Top Countries (latest snapshot) -->
-    {#if detail.latest && detail.latest.countries.length > 0}
+    {#if detail.latest && isTodayPacific(detail.latest.date) && detail.latest.countries.length > 0}
       {@const sortedCountries = [...detail.latest.countries].sort((a, b) => b.adds - a.adds)}
       <div class="countries-section">
         <h2>Top Countries for today <span class="muted-count">({detail.latest.countries.length} total)</span></h2>
@@ -779,6 +783,17 @@
     font-weight: 700;
     font-variant-numeric: tabular-nums;
     line-height: 1.2;
+  }
+
+  .no-today-banner {
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    text-align: center;
+    padding: 0.6rem 1rem;
+    margin-bottom: 1rem;
+    border-radius: 0.5rem;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px dashed var(--border);
   }
 
   .stat-big-label {
