@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Bug Fixes
+
+- Show there's no data for steam for today
+
+### Version Bumps
+
+- Default readme install version to latest + changelog
+
 ## [0.1.5] - 2026-03-24
 
 ### Bug Fixes
