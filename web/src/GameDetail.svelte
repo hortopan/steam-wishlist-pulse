@@ -15,6 +15,7 @@
     SnapshotCountriesResponse,
   } from "./types";
   import Chart from "./Chart.svelte";
+  import MilestoneCelebration from "./MilestoneCelebration.svelte";
 
   function countryFlag(code: string): string {
     if (!code || !/^[a-zA-Z]{2}$/.test(code)) return "";
@@ -37,6 +38,7 @@
   let historyData = $state<PaginatedHistoryResponse | null>(null);
   let loading = $state(true);
   let error = $state<string | null>(null);
+  let celebrationMode = $state(false);
   let now = $state(Date.now());
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
   let tickTimer: ReturnType<typeof setInterval> | null = null;
@@ -258,6 +260,9 @@
       <div class="spinner"></div>
     </div>
   {:else if detail}
+    {#if celebrationMode}
+      <MilestoneCelebration {detail} onClose={() => celebrationMode = false} />
+    {/if}
     <!-- Hero Section -->
     <div class="hero">
       {#if detail.image_url}
@@ -280,6 +285,10 @@
             <svg width="14" height="14" viewBox="0 0 20 20" fill="none"><path d="M11 3H17V9" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M17 3L9 11" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M15 11V16C15 16.5523 14.5523 17 14 17H4C3.44772 17 3 16.5523 3 16V6C3 5.44772 3.44772 5 4 5H9" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
             Steamworks
           </a>
+          <button class="hero-link celebrate-btn" onclick={() => celebrationMode = true}>
+            <svg width="14" height="14" viewBox="0 0 20 20" fill="none"><path d="M10 2L12.09 7.26L18 8.27L14 12.14L14.18 18.02L10 15.27L5.82 18.02L6 12.14L2 8.27L7.91 7.26L10 2Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="currentColor" fill-opacity="0.15"/></svg>
+            Milestone
+          </button>
         </div>
       </div>
     </div>
@@ -696,6 +705,18 @@
     background: rgba(0, 0, 0, 0.65);
     color: #fff;
     border-color: rgba(255, 255, 255, 0.3);
+  }
+
+  .celebrate-btn {
+    cursor: pointer;
+    font-family: inherit;
+    color: var(--accent, #d97706);
+    border-color: rgba(217, 119, 6, 0.3);
+  }
+
+  .celebrate-btn:hover {
+    border-color: rgba(217, 119, 6, 0.5);
+    color: var(--accent-glow, #f59e0b);
   }
 
   /* Stats */
