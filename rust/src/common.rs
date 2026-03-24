@@ -272,8 +272,13 @@ impl ChangeMessage {
                         "below"
                     };
                     if abs_median < 0.01 {
+                        let verb = if c.current_rate > 0.0 {
+                            "surged"
+                        } else {
+                            "dropped"
+                        };
                         format!(
-                            "{}: {} surged to {:.0}/day from near-zero",
+                            "{}: {} {verb} to {:.0}/day from near-zero",
                             c.country_code, c.metric, abs_rate
                         )
                     } else {

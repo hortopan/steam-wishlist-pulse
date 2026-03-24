@@ -360,9 +360,7 @@ fn is_rate_anomalous(
     if raw_delta == 0 {
         return false;
     }
-    // When the baseline median is near zero, any non-zero activity is statistically
-    // significant — skip the min_absolute gate so early signals aren't suppressed.
-    if median.abs() > f64::EPSILON && raw_delta.abs() < config.min_absolute {
+    if raw_delta.abs() < config.min_absolute {
         return false;
     }
     if mad == 0.0 {
