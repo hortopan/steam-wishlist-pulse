@@ -507,16 +507,19 @@ mod tests {
     }
 
     #[test]
-    fn test_is_rate_anomalous_near_zero_baseline_bypasses_min_absolute() {
+    fn test_is_rate_anomalous_near_zero_baseline_respects_min_absolute() {
         let config = AnomalyConfig {
             min_absolute: 5,
             ..Default::default()
         };
-        // When median is 0, min_absolute gate is skipped — small deltas are flagged
-        assert!(is_rate_anomalous(2.0, 2, 0.0, 0.0, &config));
-        assert!(is_rate_anomalous(1.0, 1, 0.0, 0.0, &config));
+        // Even with zero baseline, small deltas below min_absolute are not anomalous
+        assert!(!is_rate_anomalous(2.0, 2, 0.0, 0.0, &config));
+        assert!(!is_rate_anomalous(1.0, 1, 0.0, 0.0, &config));
         // Zero delta is still never anomalous
         assert!(!is_rate_anomalous(0.0, 0, 0.0, 0.0, &config));
+        // But deltas at or above min_absolute ARE anomalous
+        assert!(is_rate_anomalous(5.0, 5, 0.0, 0.0, &config));
+        assert!(is_rate_anomalous(10.0, 10, 0.0, 0.0, &config));
     }
 
     #[test]
