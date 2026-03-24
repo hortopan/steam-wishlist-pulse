@@ -43,10 +43,7 @@ pub fn resolve_app_name(
 }
 
 /// Resolve just the short name (no app_id suffix).
-pub fn resolve_app_name_short(
-    app_id: u32,
-    app_info: &HashMap<u32, (String, String)>,
-) -> String {
+pub fn resolve_app_name_short(app_id: u32, app_info: &HashMap<u32, (String, String)>) -> String {
     app_info
         .get(&app_id)
         .map(|(n, _)| n.clone())
@@ -228,11 +225,21 @@ impl ChangeMessage {
                             }
                         } else {
                             let ratio = abs_rate / abs_median;
-                            let direction = if m.current_rate > m.mean { "above" } else { "below" };
-                            if ratio >= 2.0 {
-                                format!("{:.0}× {direction} normal ({:.0}/day vs ~{:.0}/day)", ratio, abs_rate, abs_median)
+                            let direction = if m.current_rate > m.mean {
+                                "above"
                             } else {
-                                format!("unusual at {:.0}/day ({direction} ~{:.0}/day typical)", abs_rate, abs_median)
+                                "below"
+                            };
+                            if ratio >= 2.0 {
+                                format!(
+                                    "{:.0}× {direction} normal ({:.0}/day vs ~{:.0}/day)",
+                                    ratio, abs_rate, abs_median
+                                )
+                            } else {
+                                format!(
+                                    "unusual at {:.0}/day ({direction} ~{:.0}/day typical)",
+                                    abs_rate, abs_median
+                                )
                             }
                         };
                         MetricAnomalyFlag {
@@ -259,7 +266,11 @@ impl ChangeMessage {
                 .map(|c| {
                     let abs_rate = c.current_rate.abs();
                     let abs_median = c.mean.abs();
-                    let direction = if c.current_rate > c.mean { "above" } else { "below" };
+                    let direction = if c.current_rate > c.mean {
+                        "above"
+                    } else {
+                        "below"
+                    };
                     if abs_median < 0.01 {
                         format!(
                             "{}: {} surged to {:.0}/day from near-zero",

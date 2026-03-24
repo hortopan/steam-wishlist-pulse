@@ -88,8 +88,9 @@ pub struct Database {
 impl Database {
     pub fn open(path: &Path) -> AppResult<Self> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| AppError::other(format!("Failed to create database directory: {e}")))?;
+            std::fs::create_dir_all(parent).map_err(|e| {
+                AppError::other(format!("Failed to create database directory: {e}"))
+            })?;
         }
 
         // Run migrations on a temporary connection
@@ -179,9 +180,9 @@ impl Database {
 
         // Add platform columns to existing snapshots table (safe to run repeatedly)
         for col in &["adds_windows", "adds_mac", "adds_linux"] {
-            let _ = conn.execute_batch(
-                &format!("ALTER TABLE wishlist_snapshots ADD COLUMN {col} INTEGER NOT NULL DEFAULT 0"),
-            );
+            let _ = conn.execute_batch(&format!(
+                "ALTER TABLE wishlist_snapshots ADD COLUMN {col} INTEGER NOT NULL DEFAULT 0"
+            ));
         }
 
         // Add min_date column to app_info (safe to run repeatedly)
@@ -239,21 +240,22 @@ impl Database {
 
     pub async fn remove_tracked_game(&self, app_id: u32) -> AppResult<bool> {
         let conn = self.pool.get().await;
-        let changed =
-            conn.execute("DELETE FROM tracked_games WHERE app_id = ?1", [app_id])?;
+        let changed = conn.execute("DELETE FROM tracked_games WHERE app_id = ?1", [app_id])?;
         if changed > 0 {
             conn.execute("DELETE FROM wishlist_snapshots WHERE app_id = ?1", [app_id])?;
             conn.execute("DELETE FROM app_info WHERE app_id = ?1", [app_id])?;
             conn.execute("DELETE FROM crawled_dates WHERE app_id = ?1", [app_id])?;
-            conn.execute("DELETE FROM backfill_failed_dates WHERE app_id = ?1", [app_id])?;
+            conn.execute(
+                "DELETE FROM backfill_failed_dates WHERE app_id = ?1",
+                [app_id],
+            )?;
         }
         Ok(changed > 0)
     }
 
     pub async fn get_tracked_game_ids(&self) -> AppResult<Vec<u32>> {
         let conn = self.pool.get().await;
-        let mut stmt =
-            conn.prepare("SELECT app_id FROM tracked_games ORDER BY tracked_since")?;
+        let mut stmt = conn.prepare("SELECT app_id FROM tracked_games ORDER BY tracked_since")?;
         let ids = stmt
             .query_map([], |row| row.get(0))?
             .collect::<Result<Vec<u32>, _>>()?;
@@ -262,8 +264,7 @@ impl Database {
 
     pub async fn get_tracked_games_with_dates(&self) -> AppResult<HashMap<u32, String>> {
         let conn = self.pool.get().await;
-        let mut stmt =
-            conn.prepare("SELECT app_id, tracked_since FROM tracked_games")?;
+        let mut stmt = conn.prepare("SELECT app_id, tracked_since FROM tracked_games")?;
         let rows = stmt
             .query_map([], |row| {
                 Ok((row.get::<_, u32>(0)?, row.get::<_, String>(1)?))
@@ -296,20 +297,23 @@ impl Database {
         let result = stmt
             .query_row([app_id], |row| {
                 let snapshot_id: i64 = row.get(0)?;
-                Ok((snapshot_id, WishlistReport {
-                    app_id: row.get(1)?,
-                    date: row.get(2)?,
-                    adds: row.get(3)?,
-                    deletes: row.get(4)?,
-                    purchases: row.get(5)?,
-                    gifts: row.get(6)?,
-                    adds_windows: row.get(7)?,
-                    adds_mac: row.get(8)?,
-                    adds_linux: row.get(9)?,
-                    countries: Vec::new(),
-                    fetched_at: row.get(10)?,
-                    app_min_date: None,
-                }))
+                Ok((
+                    snapshot_id,
+                    WishlistReport {
+                        app_id: row.get(1)?,
+                        date: row.get(2)?,
+                        adds: row.get(3)?,
+                        deletes: row.get(4)?,
+                        purchases: row.get(5)?,
+                        gifts: row.get(6)?,
+                        adds_windows: row.get(7)?,
+                        adds_mac: row.get(8)?,
+                        adds_linux: row.get(9)?,
+                        countries: Vec::new(),
+                        fetched_at: row.get(10)?,
+                        app_min_date: None,
+                    },
+                ))
             })
             .ok();
 
@@ -344,7 +348,11 @@ impl Database {
     }
 
     /// Save country breakdown rows for a snapshot.
-    fn save_countries(conn: &Connection, snapshot_id: i64, countries: &[CountryReport]) -> AppResult<()> {
+    fn save_countries(
+        conn: &Connection,
+        snapshot_id: i64,
+        countries: &[CountryReport],
+    ) -> AppResult<()> {
         let mut stmt = conn.prepare(
             "INSERT INTO snapshot_countries (snapshot_id, country_code, adds, deletes, purchases, gifts)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -413,7 +421,10 @@ impl Database {
 
     /// Returns the set of dates (YYYY-MM-DD) that already have snapshot data OR have been
     /// crawled (even if no data was available) for a game.
-    pub async fn get_crawled_dates_for_game(&self, app_id: u32) -> AppResult<std::collections::HashSet<String>> {
+    pub async fn get_crawled_dates_for_game(
+        &self,
+        app_id: u32,
+    ) -> AppResult<std::collections::HashSet<String>> {
         let conn = self.pool.get().await;
         let mut stmt = conn.prepare(
             "SELECT DISTINCT date FROM wishlist_snapshots WHERE app_id = ?1
@@ -438,7 +449,11 @@ impl Database {
 
     /// Insert a snapshot with a specific fetched_at timestamp (for backfilling historical data).
     /// Skips the insert if a snapshot already exists for this (app_id, date).
-    pub async fn insert_backfill_snapshot(&self, report: &WishlistReport, fetched_at: &str) -> AppResult<()> {
+    pub async fn insert_backfill_snapshot(
+        &self,
+        report: &WishlistReport,
+        fetched_at: &str,
+    ) -> AppResult<()> {
         let conn = self.pool.get().await;
 
         // Skip if a snapshot already exists for this date (e.g. from the initial fetch on track)
@@ -497,11 +512,12 @@ impl Database {
         Ok(())
     }
 
-    pub async fn get_failed_dates(&self, app_id: u32) -> AppResult<std::collections::HashSet<String>> {
+    pub async fn get_failed_dates(
+        &self,
+        app_id: u32,
+    ) -> AppResult<std::collections::HashSet<String>> {
         let conn = self.pool.get().await;
-        let mut stmt = conn.prepare(
-            "SELECT date FROM backfill_failed_dates WHERE app_id = ?1",
-        )?;
+        let mut stmt = conn.prepare("SELECT date FROM backfill_failed_dates WHERE app_id = ?1")?;
         let dates = stmt
             .query_map([app_id], |row| row.get::<_, String>(0))?
             .collect::<Result<std::collections::HashSet<String>, _>>()?;
@@ -534,12 +550,7 @@ impl Database {
 
     // ── App info (name & image cache) ────────────────────────────────
 
-    pub async fn upsert_app_info(
-        &self,
-        app_id: u32,
-        name: &str,
-        image_url: &str,
-    ) -> AppResult<()> {
+    pub async fn upsert_app_info(&self, app_id: u32, name: &str, image_url: &str) -> AppResult<()> {
         let conn = self.pool.get().await;
         conn.execute(
             "INSERT INTO app_info (app_id, name, image_url) VALUES (?1, ?2, ?3)
@@ -610,10 +621,7 @@ impl Database {
         Ok(ids)
     }
 
-    pub async fn get_subscribed_channels(
-        &self,
-        app_id: u32,
-    ) -> AppResult<Vec<(String, String)>> {
+    pub async fn get_subscribed_channels(&self, app_id: u32) -> AppResult<Vec<(String, String)>> {
         let conn = self.pool.get().await;
         let mut stmt = conn
             .prepare("SELECT provider, channel_id FROM channel_subscriptions WHERE app_id = ?1")?;
@@ -653,20 +661,23 @@ impl Database {
         )?;
         let rows: Vec<(Option<i64>, WishlistReport)> = stmt
             .query_map([], |row| {
-                Ok((row.get(0)?, WishlistReport {
-                    app_id: row.get(1)?,
-                    date: row.get(2)?,
-                    adds: row.get(3)?,
-                    deletes: row.get(4)?,
-                    purchases: row.get(5)?,
-                    gifts: row.get(6)?,
-                    adds_windows: row.get(7)?,
-                    adds_mac: row.get(8)?,
-                    adds_linux: row.get(9)?,
-                    countries: Vec::new(),
-                    fetched_at: row.get(10)?,
-                    app_min_date: None,
-                }))
+                Ok((
+                    row.get(0)?,
+                    WishlistReport {
+                        app_id: row.get(1)?,
+                        date: row.get(2)?,
+                        adds: row.get(3)?,
+                        deletes: row.get(4)?,
+                        purchases: row.get(5)?,
+                        gifts: row.get(6)?,
+                        adds_windows: row.get(7)?,
+                        adds_mac: row.get(8)?,
+                        adds_linux: row.get(9)?,
+                        countries: Vec::new(),
+                        fetched_at: row.get(10)?,
+                        app_min_date: None,
+                    },
+                ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
 
@@ -789,7 +800,13 @@ impl Database {
                  ORDER BY fetched_at ASC",
             )?;
             stmt.query_map(rusqlite::params![app_id, offset, cutoff], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
             })?
             .collect::<Result<Vec<_>, _>>()?
         } else {
@@ -800,7 +817,13 @@ impl Database {
                  ORDER BY fetched_at ASC",
             )?;
             stmt.query_map(rusqlite::params![app_id, offset], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
             })?
             .collect::<Result<Vec<_>, _>>()?
         };
@@ -847,7 +870,13 @@ impl Database {
                  ORDER BY ws.fetched_at ASC, sc.country_code ASC",
             )?;
             stmt.query_map(rusqlite::params![app_id, offset, cutoff], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
             })?
             .collect::<Result<Vec<_>, _>>()?
         } else {
@@ -859,7 +888,13 @@ impl Database {
                  ORDER BY ws.fetched_at ASC, sc.country_code ASC",
             )?;
             stmt.query_map(rusqlite::params![app_id, offset], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
             })?
             .collect::<Result<Vec<_>, _>>()?
         };
@@ -1067,20 +1102,23 @@ impl Database {
         )?;
         let rows = stmt
             .query_map(rusqlite::params![app_id, per_page_i64, offset], |row| {
-                Ok((row.get(0)?, WishlistReport {
-                    app_id: row.get(1)?,
-                    date: row.get(2)?,
-                    adds: row.get(3)?,
-                    deletes: row.get(4)?,
-                    purchases: row.get(5)?,
-                    gifts: row.get(6)?,
-                    adds_windows: row.get(7)?,
-                    adds_mac: row.get(8)?,
-                    adds_linux: row.get(9)?,
-                    countries: Vec::new(),
-                    fetched_at: row.get(10)?,
-                    app_min_date: None,
-                }))
+                Ok((
+                    row.get(0)?,
+                    WishlistReport {
+                        app_id: row.get(1)?,
+                        date: row.get(2)?,
+                        adds: row.get(3)?,
+                        deletes: row.get(4)?,
+                        purchases: row.get(5)?,
+                        gifts: row.get(6)?,
+                        adds_windows: row.get(7)?,
+                        adds_mac: row.get(8)?,
+                        adds_linux: row.get(9)?,
+                        countries: Vec::new(),
+                        fetched_at: row.get(10)?,
+                        app_min_date: None,
+                    },
+                ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
 
@@ -1144,7 +1182,6 @@ impl Database {
         }
         Ok(Some(Self::load_countries(&conn, snapshot_id)?))
     }
-
 }
 
 /// Parse a flexible timestamp/label string into a NaiveDateTime.
@@ -1184,8 +1221,7 @@ fn parse_flexible_timestamp(s: &str) -> Option<chrono::NaiveDateTime> {
             if s.len() == 7 && s.as_bytes()[4] == b'-' {
                 let year: i32 = s[..4].parse().ok()?;
                 let month: u32 = s[5..7].parse().ok()?;
-                NaiveDate::from_ymd_opt(year, month, 1)
-                    .and_then(|d| d.and_hms_opt(0, 0, 0))
+                NaiveDate::from_ymd_opt(year, month, 1).and_then(|d| d.and_hms_opt(0, 0, 0))
             } else {
                 None
             }

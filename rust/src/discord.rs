@@ -1,13 +1,14 @@
+use serenity::Client;
 use serenity::all::{
     ChannelId, Command, CommandInteraction, CommandOptionType, Context, CreateCommand,
-    CreateCommandOption, CreateEmbed, CreateInteractionResponse,
-    CreateMessage, EditInteractionResponse, EventHandler,
-    GatewayIntents, Ready,
+    CreateCommandOption, CreateEmbed, CreateInteractionResponse, CreateMessage,
+    EditInteractionResponse, EventHandler, GatewayIntents, Ready,
 };
 use serenity::async_trait;
-use serenity::Client;
 
-use crate::common::{BotContext, ChangeMessage, is_admin, prepare_notification, resolve_app_name_short};
+use crate::common::{
+    BotContext, ChangeMessage, is_admin, prepare_notification, resolve_app_name_short,
+};
 use crate::db::Database;
 use crate::error::{AppError, AppResult};
 use crate::steam::{SteamClient, WishlistReport};
@@ -24,10 +25,8 @@ impl EventHandler for Handler {
 
         // Register slash commands globally
         let commands = vec![
-            CreateCommand::new("help")
-                .description("Show available commands"),
-            CreateCommand::new("list")
-                .description("List currently tracked games"),
+            CreateCommand::new("help").description("Show available commands"),
+            CreateCommand::new("list").description("List currently tracked games"),
             CreateCommand::new("track")
                 .description("Track a game by app ID")
                 .add_option(
@@ -48,8 +47,7 @@ impl EventHandler for Handler {
                     )
                     .required(true),
                 ),
-            CreateCommand::new("status")
-                .description("Fetch current wishlist stats"),
+            CreateCommand::new("status").description("Fetch current wishlist stats"),
             CreateCommand::new("subscribe")
                 .description("Subscribe this channel to a tracked game")
                 .add_option(
@@ -70,10 +68,8 @@ impl EventHandler for Handler {
                     )
                     .required(true),
                 ),
-            CreateCommand::new("subscriptions")
-                .description("List this channel's subscriptions"),
-            CreateCommand::new("whoami")
-                .description("Show your Discord user ID"),
+            CreateCommand::new("subscriptions").description("List this channel's subscriptions"),
+            CreateCommand::new("whoami").description("Show your Discord user ID"),
         ];
 
         match Command::set_global_commands(&ctx.http, commands).await {
@@ -92,11 +88,7 @@ impl EventHandler for Handler {
 }
 
 impl Handler {
-    async fn handle_command(
-        &self,
-        ctx: &Context,
-        cmd: &CommandInteraction,
-    ) -> Result<(), String> {
+    async fn handle_command(&self, ctx: &Context, cmd: &CommandInteraction) -> Result<(), String> {
         let user_id = cmd.user.id.get();
 
         // Defer immediately to avoid Discord's 3-second interaction timeout.
@@ -139,8 +131,12 @@ impl Handler {
                 }
             }
             _ => {
-                self.edit_response(ctx, cmd, "Unknown command. Use /help to see available commands.")
-                    .await?;
+                self.edit_response(
+                    ctx,
+                    cmd,
+                    "Unknown command. Use /help to see available commands.",
+                )
+                .await?;
             }
         }
         Ok(())
@@ -160,14 +156,13 @@ impl Handler {
             .to_string()
     }
 
-    async fn defer(
-        &self,
-        ctx: &Context,
-        cmd: &CommandInteraction,
-    ) -> Result<(), String> {
-        cmd.create_response(&ctx.http, CreateInteractionResponse::Defer(Default::default()))
-            .await
-            .map_err(|e| format!("Failed to defer: {e}"))
+    async fn defer(&self, ctx: &Context, cmd: &CommandInteraction) -> Result<(), String> {
+        cmd.create_response(
+            &ctx.http,
+            CreateInteractionResponse::Defer(Default::default()),
+        )
+        .await
+        .map_err(|e| format!("Failed to defer: {e}"))
     }
 
     async fn edit_response(
@@ -183,9 +178,15 @@ impl Handler {
     }
 
     async fn cmd_list(&self, ctx: &Context, cmd: &CommandInteraction) -> Result<(), String> {
-        let tracked = self.ctx.db.get_tracked_game_ids().await.map_err(|e| e.to_string())?;
+        let tracked = self
+            .ctx
+            .db
+            .get_tracked_game_ids()
+            .await
+            .map_err(|e| e.to_string())?;
         if tracked.is_empty() {
-            self.edit_response(ctx, cmd, "No games being tracked.").await?;
+            self.edit_response(ctx, cmd, "No games being tracked.")
+                .await?;
             return Ok(());
         }
 
@@ -195,15 +196,24 @@ impl Handler {
             .map(|&id| format!("• **{}** ({id})", resolve_app_name_short(id, &app_info)))
             .collect();
 
-        self.edit_response(ctx, cmd, &format!("**Tracked games:**\n{}", lines.join("\n")))
-            .await
+        self.edit_response(
+            ctx,
+            cmd,
+            &format!("**Tracked games:**\n{}", lines.join("\n")),
+        )
+        .await
     }
 
     async fn cmd_track(&self, ctx: &Context, cmd: &CommandInteraction) -> Result<(), String> {
         let steam = match &self.ctx.steam {
             Some(s) => s,
             None => {
-                self.edit_response(ctx, cmd, "Steam API key is not configured. Please set it up in the admin panel first.").await?;
+                self.edit_response(
+                    ctx,
+                    cmd,
+                    "Steam API key is not configured. Please set it up in the admin panel first.",
+                )
+                .await?;
                 return Ok(());
             }
         };
@@ -273,14 +283,24 @@ impl Handler {
     }
 
     async fn cmd_status(&self, ctx: &Context, cmd: &CommandInteraction) -> Result<(), String> {
-        let tracked = self.ctx.db.get_tracked_game_ids().await.map_err(|e| e.to_string())?;
+        let tracked = self
+            .ctx
+            .db
+            .get_tracked_game_ids()
+            .await
+            .map_err(|e| e.to_string())?;
         if tracked.is_empty() {
             self.edit_response(ctx, cmd, "No games being tracked. Use /track to add games.")
                 .await?;
             return Ok(());
         }
 
-        let snapshots = self.ctx.db.get_latest_snapshots().await.map_err(|e| e.to_string())?;
+        let snapshots = self
+            .ctx
+            .db
+            .get_latest_snapshots()
+            .await
+            .map_err(|e| e.to_string())?;
         if snapshots.is_empty() {
             self.edit_response(
                 ctx,
@@ -298,7 +318,13 @@ impl Handler {
             let name = resolve_app_name_short(report.app_id, &app_info);
             lines.push(format!(
                 "**{}** ({}) ({})\n+{} adds / -{} deletes / {} purchases / {} gifts",
-                name, report.app_id, report.date, report.adds, report.deletes, report.purchases, report.gifts,
+                name,
+                report.app_id,
+                report.date,
+                report.adds,
+                report.deletes,
+                report.purchases,
+                report.gifts,
             ));
         }
 
@@ -311,8 +337,12 @@ impl Handler {
 
         match self.ctx.db.is_tracked(app_id).await {
             Ok(false) => {
-                self.edit_response(ctx, cmd, &format!("App {app_id} is not being tracked. Use /track first."))
-                    .await?;
+                self.edit_response(
+                    ctx,
+                    cmd,
+                    &format!("App {app_id} is not being tracked. Use /track first."),
+                )
+                .await?;
                 return Ok(());
             }
             Err(e) => {
@@ -324,12 +354,21 @@ impl Handler {
             Ok(true) => {}
         }
 
-        match self.ctx.db.subscribe_channel("discord", &channel_id, app_id).await {
+        match self
+            .ctx
+            .db
+            .subscribe_channel("discord", &channel_id, app_id)
+            .await
+        {
             Ok(true) => {
                 let app_info = self.ctx.db.get_all_app_info().await.unwrap_or_default();
                 let name = resolve_app_name_short(app_id, &app_info);
-                self.edit_response(ctx, cmd, &format!("Subscribed this channel to **{name}** ({app_id})"))
-                    .await
+                self.edit_response(
+                    ctx,
+                    cmd,
+                    &format!("Subscribed this channel to **{name}** ({app_id})"),
+                )
+                .await
             }
             Ok(false) => {
                 self.edit_response(ctx, cmd, "This channel is already subscribed to that game.")
@@ -343,11 +382,7 @@ impl Handler {
         }
     }
 
-    async fn cmd_unsubscribe(
-        &self,
-        ctx: &Context,
-        cmd: &CommandInteraction,
-    ) -> Result<(), String> {
+    async fn cmd_unsubscribe(&self, ctx: &Context, cmd: &CommandInteraction) -> Result<(), String> {
         let app_id = self.get_int_option(cmd, "app_id")? as u32;
         let channel_id = cmd.channel_id.get().to_string();
 
@@ -434,12 +469,7 @@ pub async fn validate_token(token: &str) -> AppResult<String> {
 }
 
 /// Run the Discord bot. This blocks until the bot disconnects.
-pub async fn run_bot(
-    token: String,
-    steam: Option<SteamClient>,
-    db: Database,
-    admin_ids: Vec<u64>,
-) {
+pub async fn run_bot(token: String, steam: Option<SteamClient>, db: Database, admin_ids: Vec<u64>) {
     let handler = Handler {
         ctx: BotContext {
             db,
@@ -483,35 +513,47 @@ pub async fn notify_change(
 
     let http = serenity::http::Http::new(&ctx.token);
 
-    let color = if msg.anomaly_flags.is_some() { 0xff4444 } else { 0x1b96f3 };
+    let color = if msg.anomaly_flags.is_some() {
+        0xff4444
+    } else {
+        0x1b96f3
+    };
 
-    let fmt_field = |name: &str, value: &str, flag: Option<&crate::common::MetricAnomalyFlag>| -> (String, String) {
+    let fmt_field = |name: &str,
+                     value: &str,
+                     flag: Option<&crate::common::MetricAnomalyFlag>|
+     -> (String, String) {
         match flag {
-            Some(f) if f.is_anomalous => (
-                format!("{name} ⚠️"),
-                format!("{value}\n*{}*", f.detail),
-            ),
+            Some(f) if f.is_anomalous => (format!("{name} ⚠️"), format!("{value}\n*{}*", f.detail)),
             _ => (name.to_string(), value.to_string()),
         }
     };
 
-    let (adds_label, adds_value, deletes_label, deletes_value, purchases_label, purchases_value, gifts_label, gifts_value) =
-        match &msg.anomaly_flags {
-            Some(f) => {
-                let (al, av) = fmt_field("Adds", &msg.adds, Some(&f.adds));
-                let (dl, dv) = fmt_field("Deletes", &msg.deletes, Some(&f.deletes));
-                let (pl, pv) = fmt_field("Purchases", &msg.purchases, Some(&f.purchases));
-                let (gl, gv) = fmt_field("Gifts", &msg.gifts, Some(&f.gifts));
-                (al, av, dl, dv, pl, pv, gl, gv)
-            }
-            None => {
-                let (al, av) = fmt_field("Adds", &msg.adds, None);
-                let (dl, dv) = fmt_field("Deletes", &msg.deletes, None);
-                let (pl, pv) = fmt_field("Purchases", &msg.purchases, None);
-                let (gl, gv) = fmt_field("Gifts", &msg.gifts, None);
-                (al, av, dl, dv, pl, pv, gl, gv)
-            }
-        };
+    let (
+        adds_label,
+        adds_value,
+        deletes_label,
+        deletes_value,
+        purchases_label,
+        purchases_value,
+        gifts_label,
+        gifts_value,
+    ) = match &msg.anomaly_flags {
+        Some(f) => {
+            let (al, av) = fmt_field("Adds", &msg.adds, Some(&f.adds));
+            let (dl, dv) = fmt_field("Deletes", &msg.deletes, Some(&f.deletes));
+            let (pl, pv) = fmt_field("Purchases", &msg.purchases, Some(&f.purchases));
+            let (gl, gv) = fmt_field("Gifts", &msg.gifts, Some(&f.gifts));
+            (al, av, dl, dv, pl, pv, gl, gv)
+        }
+        None => {
+            let (al, av) = fmt_field("Adds", &msg.adds, None);
+            let (dl, dv) = fmt_field("Deletes", &msg.deletes, None);
+            let (pl, pv) = fmt_field("Purchases", &msg.purchases, None);
+            let (gl, gv) = fmt_field("Gifts", &msg.gifts, None);
+            (al, av, dl, dv, pl, pv, gl, gv)
+        }
+    };
 
     for channel_id_str in &ctx.channels {
         let channel_id: u64 = match channel_id_str.parse() {
@@ -540,7 +582,10 @@ pub async fn notify_change(
 
         let message = CreateMessage::new().embed(embed);
 
-        match ChannelId::new(channel_id).send_message(&http, message).await {
+        match ChannelId::new(channel_id)
+            .send_message(&http, message)
+            .await
+        {
             Ok(_) => {
                 tracing::info!(
                     "Sent notification to Discord channel {channel_id_str} for app {app_id}"

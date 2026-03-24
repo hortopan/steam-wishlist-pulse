@@ -116,10 +116,15 @@ pub async fn detect_anomalies(
 ) -> AnomalyResult {
     // Use previous snapshot's timestamp as cutoff so the current delta is excluded from baseline
     let exclude_after = previous.fetched_at.as_deref();
-    let historical_deltas = match db.get_recent_deltas(app_id, config.lookback_days, exclude_after).await {
+    let historical_deltas = match db
+        .get_recent_deltas(app_id, config.lookback_days, exclude_after)
+        .await
+    {
         Ok(deltas) => deltas,
         Err(e) => {
-            tracing::warn!("Failed to fetch historical deltas for anomaly detection (app {app_id}): {e}");
+            tracing::warn!(
+                "Failed to fetch historical deltas for anomaly detection (app {app_id}): {e}"
+            );
             return AnomalyResult {
                 is_anomalous: false,
                 insufficient_data: false,
@@ -146,12 +151,22 @@ pub async fn detect_anomalies(
         (Some(prev_ts), Some(curr_ts)) => crate::db::elapsed_days(prev_ts, curr_ts),
         _ => 1.0, // fallback: assume ~1 day if timestamps unavailable
     };
-    let days_elapsed = if days_elapsed <= 0.0 { 1.0 } else { days_elapsed };
+    let days_elapsed = if days_elapsed <= 0.0 {
+        1.0
+    } else {
+        days_elapsed
+    };
 
     let current_deltas = [
         (RateField::Adds, safe_delta(current.adds, previous.adds)),
-        (RateField::Deletes, safe_delta(current.deletes, previous.deletes)),
-        (RateField::Purchases, safe_delta(current.purchases, previous.purchases)),
+        (
+            RateField::Deletes,
+            safe_delta(current.deletes, previous.deletes),
+        ),
+        (
+            RateField::Purchases,
+            safe_delta(current.purchases, previous.purchases),
+        ),
         (RateField::Gifts, safe_delta(current.gifts, previous.gifts)),
     ];
 
@@ -171,7 +186,8 @@ pub async fn detect_anomalies(
         let effective_mad = apply_mad_floor(mad, median, config.mad_floor_pct);
         let (threshold_low, threshold_high) = thresholds_directional(median, effective_mad, config);
 
-        let is_anomalous = is_rate_anomalous(current_rate, *raw_delta, median, effective_mad, config);
+        let is_anomalous =
+            is_rate_anomalous(current_rate, *raw_delta, median, effective_mad, config);
 
         if is_anomalous {
             any_anomalous = true;
@@ -190,7 +206,8 @@ pub async fn detect_anomalies(
     }
 
     // Country-level anomaly detection
-    let country_anomalies = detect_country_anomalies(db, app_id, current, previous, days_elapsed, config).await;
+    let country_anomalies =
+        detect_country_anomalies(db, app_id, current, previous, days_elapsed, config).await;
     if !country_anomalies.is_empty() {
         any_anomalous = true;
     }
@@ -214,10 +231,15 @@ async fn detect_country_anomalies(
     config: &AnomalyConfig,
 ) -> Vec<CountryAnomaly> {
     let exclude_after = previous.fetched_at.as_deref();
-    let historical = match db.get_recent_country_deltas(app_id, config.lookback_days, exclude_after).await {
+    let historical = match db
+        .get_recent_country_deltas(app_id, config.lookback_days, exclude_after)
+        .await
+    {
         Ok(h) => h,
         Err(e) => {
-            tracing::warn!("Failed to fetch country deltas for anomaly detection (app {app_id}): {e}");
+            tracing::warn!(
+                "Failed to fetch country deltas for anomaly detection (app {app_id}): {e}"
+            );
             return Vec::new();
         }
     };
@@ -252,7 +274,11 @@ async fn detect_country_anomalies(
 
         let mut historical_adds: Vec<f64> = country_deltas.iter().map(|d| d.adds_rate).collect();
         let adds_median = f64_median(&mut historical_adds);
-        let adds_mad = apply_mad_floor(f64_mad(&mut historical_adds, adds_median), adds_median, config.mad_floor_pct);
+        let adds_mad = apply_mad_floor(
+            f64_mad(&mut historical_adds, adds_median),
+            adds_median,
+            config.mad_floor_pct,
+        );
 
         if is_rate_anomalous(adds_rate, adds_raw, adds_median, adds_mad, config) {
             anomalies.push(CountryAnomaly {
@@ -271,11 +297,22 @@ async fn detect_country_anomalies(
         let deletes_raw = safe_delta(current_deletes, previous_deletes);
         let deletes_rate = deletes_raw as f64 / days_elapsed;
 
-        let mut historical_deletes: Vec<f64> = country_deltas.iter().map(|d| d.deletes_rate).collect();
+        let mut historical_deletes: Vec<f64> =
+            country_deltas.iter().map(|d| d.deletes_rate).collect();
         let deletes_median = f64_median(&mut historical_deletes);
-        let deletes_mad = apply_mad_floor(f64_mad(&mut historical_deletes, deletes_median), deletes_median, config.mad_floor_pct);
+        let deletes_mad = apply_mad_floor(
+            f64_mad(&mut historical_deletes, deletes_median),
+            deletes_median,
+            config.mad_floor_pct,
+        );
 
-        if is_rate_anomalous(deletes_rate, deletes_raw, deletes_median, deletes_mad, config) {
+        if is_rate_anomalous(
+            deletes_rate,
+            deletes_raw,
+            deletes_median,
+            deletes_mad,
+            config,
+        ) {
             anomalies.push(CountryAnomaly {
                 country_code: country_code.clone(),
                 metric: "deletes",
@@ -288,7 +325,12 @@ async fn detect_country_anomalies(
     }
 
     // Sort by absolute rate descending for most impactful first
-    anomalies.sort_by(|a, b| b.current_rate.abs().partial_cmp(&a.current_rate.abs()).unwrap_or(std::cmp::Ordering::Equal));
+    anomalies.sort_by(|a, b| {
+        b.current_rate
+            .abs()
+            .partial_cmp(&a.current_rate.abs())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     anomalies
 }
@@ -308,7 +350,13 @@ fn safe_delta(current: i64, previous: i64) -> i64 {
 ///
 /// When MAD is 0 (perfectly stable history), any rate change meeting
 /// `min_absolute` is considered anomalous.
-fn is_rate_anomalous(rate: f64, raw_delta: i64, median: f64, mad: f64, config: &AnomalyConfig) -> bool {
+fn is_rate_anomalous(
+    rate: f64,
+    raw_delta: i64,
+    median: f64,
+    mad: f64,
+    config: &AnomalyConfig,
+) -> bool {
     if raw_delta == 0 {
         return false;
     }
@@ -376,9 +424,15 @@ fn thresholds_directional(median: f64, mad: f64, config: &AnomalyConfig) -> (f64
 }
 
 // Public re-exports for web.rs chart anomaly logic (avoids duplicating math).
-pub fn f64_median_pub(values: &mut [f64]) -> f64 { f64_median(values) }
-pub fn f64_mad_pub(values: &mut [f64], median: f64) -> f64 { f64_mad(values, median) }
-pub fn apply_mad_floor_pub(mad: f64, median: f64, floor_pct: f64) -> f64 { apply_mad_floor(mad, median, floor_pct) }
+pub fn f64_median_pub(values: &mut [f64]) -> f64 {
+    f64_median(values)
+}
+pub fn f64_mad_pub(values: &mut [f64], median: f64) -> f64 {
+    f64_mad(values, median)
+}
+pub fn apply_mad_floor_pub(mad: f64, median: f64, floor_pct: f64) -> f64 {
+    apply_mad_floor(mad, median, floor_pct)
+}
 
 #[cfg(test)]
 mod tests {
@@ -446,14 +500,20 @@ mod tests {
 
     #[test]
     fn test_is_rate_anomalous_below_min_absolute() {
-        let config = AnomalyConfig { min_absolute: 10, ..Default::default() };
+        let config = AnomalyConfig {
+            min_absolute: 10,
+            ..Default::default()
+        };
         // Raw delta of 5 is below min_absolute of 10 (with non-zero median, gate applies)
         assert!(!is_rate_anomalous(50.0, 5, 50.0, 5.0, &config));
     }
 
     #[test]
     fn test_is_rate_anomalous_near_zero_baseline_bypasses_min_absolute() {
-        let config = AnomalyConfig { min_absolute: 5, ..Default::default() };
+        let config = AnomalyConfig {
+            min_absolute: 5,
+            ..Default::default()
+        };
         // When median is 0, min_absolute gate is skipped — small deltas are flagged
         assert!(is_rate_anomalous(2.0, 2, 0.0, 0.0, &config));
         assert!(is_rate_anomalous(1.0, 1, 0.0, 0.0, &config));
@@ -463,7 +523,10 @@ mod tests {
 
     #[test]
     fn test_is_rate_anomalous_constant_history() {
-        let config = AnomalyConfig { min_absolute: 1, ..Default::default() };
+        let config = AnomalyConfig {
+            min_absolute: 1,
+            ..Default::default()
+        };
         // History was constant at 0 rate, MAD=0, any non-zero rate is anomalous
         assert!(is_rate_anomalous(10.0, 10, 0.0, 0.0, &config));
         // Rate matches median → not anomalous
@@ -493,7 +556,7 @@ mod tests {
     fn test_directional_sensitivity() {
         // Different sensitivity for up vs down
         let config = AnomalyConfig {
-            sensitivity_up: 3.0,  // lenient for spikes
+            sensitivity_up: 3.0,   // lenient for spikes
             sensitivity_down: 1.5, // strict for drops
             min_absolute: 1,
             ..Default::default()

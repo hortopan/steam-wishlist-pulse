@@ -2,7 +2,10 @@ use teloxide::prelude::*;
 use teloxide::types::{BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Me, ParseMode};
 use teloxide::utils::command::BotCommands;
 
-use crate::common::{BotContext, ChangeMessage, is_admin, prepare_notification, resolve_app_name, resolve_app_name_short};
+use crate::common::{
+    BotContext, ChangeMessage, is_admin, prepare_notification, resolve_app_name,
+    resolve_app_name_short,
+};
 use crate::db::Database;
 use crate::error::{AppError, AppResult};
 use crate::steam::{SteamClient, WishlistReport};
@@ -391,7 +394,13 @@ async fn handle_command(
                 let name = resolve_app_name_short(report.app_id, &app_info);
                 lines.push(format!(
                     "📊 {} ({}) ({})\n   +{} adds / -{} deletes / {} purchases / {} gifts",
-                    name, report.app_id, report.date, report.adds, report.deletes, report.purchases, report.gifts,
+                    name,
+                    report.app_id,
+                    report.date,
+                    report.adds,
+                    report.deletes,
+                    report.purchases,
+                    report.gifts,
                 ));
             }
 
@@ -655,14 +664,19 @@ pub async fn notify_change(
 
     let msg = ChangeMessage::new(ctx.app_name, current, previous, anomaly);
 
-    let emoji = if msg.anomaly_flags.is_some() { "🚨" } else { "📊" };
-
-    let fmt_metric = |label: &str, value: &str, flag: Option<&crate::common::MetricAnomalyFlag>| -> String {
-        match flag {
-            Some(f) if f.is_anomalous => format!("{label}: {value} ⚠️\n  <i>{}</i>", f.detail),
-            _ => format!("{label}: {value}"),
-        }
+    let emoji = if msg.anomaly_flags.is_some() {
+        "🚨"
+    } else {
+        "📊"
     };
+
+    let fmt_metric =
+        |label: &str, value: &str, flag: Option<&crate::common::MetricAnomalyFlag>| -> String {
+            match flag {
+                Some(f) if f.is_anomalous => format!("{label}: {value} ⚠️\n  <i>{}</i>", f.detail),
+                _ => format!("{label}: {value}"),
+            }
+        };
 
     let (adds_line, deletes_line, purchases_line, gifts_line) = match &msg.anomaly_flags {
         Some(f) => (
@@ -681,7 +695,8 @@ pub async fn notify_change(
 
     let mut message = format!(
         "{emoji} <b>{}</b> ({app_id}) > {}\n\n{adds_line}\n{deletes_line}\n{purchases_line}\n{gifts_line}",
-        msg.app_name, msg.header(),
+        msg.app_name,
+        msg.header(),
     );
 
     if let Some(flags) = &msg.anomaly_flags

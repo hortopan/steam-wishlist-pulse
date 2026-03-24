@@ -38,7 +38,10 @@ struct CliArgs {
     #[arg(long, help = "Steam polling interval in minutes (default: 5)")]
     poll_interval_minutes: Option<u64>,
 
-    #[arg(long, help = "Backfill rate limit in requests per second (default: 1.0)")]
+    #[arg(
+        long,
+        help = "Backfill rate limit in requests per second (default: 1.0)"
+    )]
     backfill_rate: Option<f64>,
 }
 
@@ -169,10 +172,8 @@ fn build_config(args: CliArgs) -> Result<AppConfig, String> {
         return Err("Poll interval must be at least 1 minute".to_string());
     }
 
-    let backfill_rate_str = resolve_string(
-        args.backfill_rate.map(|v| v.to_string()),
-        ENV_BACKFILL_RATE,
-    )?;
+    let backfill_rate_str =
+        resolve_string(args.backfill_rate.map(|v| v.to_string()), ENV_BACKFILL_RATE)?;
     let backfill_rate = match backfill_rate_str {
         Some(s) => {
             let rate = s

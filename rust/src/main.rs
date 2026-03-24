@@ -23,8 +23,7 @@ use web::AppState;
 async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::from_default_env()
-                .add_directive("wishlist_pulse=info".parse().unwrap()),
+            EnvFilter::from_default_env().add_directive("wishlist_pulse=info".parse().unwrap()),
         )
         .with_target(false)
         .init();
@@ -36,11 +35,10 @@ async fn main() {
     tracing::info!("Poll interval: {} minutes", config.poll_interval_minutes);
     tracing::info!("Backfill rate: {} req/sec", config.backfill_rate);
 
-    let db = Database::open(&config.database_path)
-        .unwrap_or_else(|e| {
-            eprintln!("Failed to open database: {e}");
-            std::process::exit(1);
-        });
+    let db = Database::open(&config.database_path).unwrap_or_else(|e| {
+        eprintln!("Failed to open database: {e}");
+        std::process::exit(1);
+    });
 
     // Initialize passwords from CLI/env if provided
     web::init_passwords_from_config(
@@ -52,18 +50,27 @@ async fn main() {
 
     // ── Encryption secret rotation check ──────────────────────────────
     const CONFIG_ENCRYPTION_SECRET_HASH: &str = "encryption_secret_hash";
-    const ENCRYPTED_CONFIG_KEYS: &[&str] = &["steam_api_key", "telegram_bot_token", "discord_bot_token"];
+    const ENCRYPTED_CONFIG_KEYS: &[&str] =
+        &["steam_api_key", "telegram_bot_token", "discord_bot_token"];
 
     if let Some(ref secret) = config.encryption_secret {
         let new_hash = crypto::hash_secret(secret);
-        let stored_hash = db.get_config(CONFIG_ENCRYPTION_SECRET_HASH).await.ok().flatten();
+        let stored_hash = db
+            .get_config(CONFIG_ENCRYPTION_SECRET_HASH)
+            .await
+            .ok()
+            .flatten();
         if let Some(ref old_hash) = stored_hash {
             if *old_hash != new_hash {
-                tracing::warn!("Encryption secret has changed — removing all encrypted credentials (they were encrypted with the old secret). Please re-enter them via the admin panel.");
+                tracing::warn!(
+                    "Encryption secret has changed — removing all encrypted credentials (they were encrypted with the old secret). Please re-enter them via the admin panel."
+                );
                 for key in ENCRYPTED_CONFIG_KEYS {
                     let _ = db.delete_config(key).await;
                 }
-                let _ = db.set_config(CONFIG_ENCRYPTION_SECRET_HASH, &new_hash).await;
+                let _ = db
+                    .set_config(CONFIG_ENCRYPTION_SECRET_HASH, &new_hash)
+                    .await;
             }
         } else {
             // First time setting an encryption secret — remove any existing plaintext credentials
@@ -76,16 +83,28 @@ async fn main() {
                 }
             }
             if removed {
-                tracing::warn!("Encryption secret set for the first time — removed existing plaintext credentials. Please re-enter them via the admin panel.");
+                tracing::warn!(
+                    "Encryption secret set for the first time — removed existing plaintext credentials. Please re-enter them via the admin panel."
+                );
             }
-            let _ = db.set_config(CONFIG_ENCRYPTION_SECRET_HASH, &new_hash).await;
+            let _ = db
+                .set_config(CONFIG_ENCRYPTION_SECRET_HASH, &new_hash)
+                .await;
         }
     } else {
-        tracing::warn!("No ENCRYPTION_SECRET set — API keys and bot tokens will be stored unencrypted in the database. Set ENCRYPTION_SECRET environment variable for encryption at rest.");
+        tracing::warn!(
+            "No ENCRYPTION_SECRET set — API keys and bot tokens will be stored unencrypted in the database. Set ENCRYPTION_SECRET environment variable for encryption at rest."
+        );
         // If encryption was previously enabled but now removed, stored credentials are unusable
-        let stored_hash = db.get_config(CONFIG_ENCRYPTION_SECRET_HASH).await.ok().flatten();
+        let stored_hash = db
+            .get_config(CONFIG_ENCRYPTION_SECRET_HASH)
+            .await
+            .ok()
+            .flatten();
         if stored_hash.is_some() {
-            tracing::warn!("Encryption was previously enabled — removing encrypted credentials (cannot decrypt without secret). Please re-enter them via the admin panel.");
+            tracing::warn!(
+                "Encryption was previously enabled — removing encrypted credentials (cannot decrypt without secret). Please re-enter them via the admin panel."
+            );
             for key in ENCRYPTED_CONFIG_KEYS {
                 let _ = db.delete_config(key).await;
             }
@@ -100,7 +119,9 @@ async fn main() {
                 match crypto::decrypt(secret, &stored) {
                     Ok(key) => Some(key),
                     Err(e) => {
-                        tracing::error!("Failed to decrypt Steam API key: {e} — removing corrupted entry");
+                        tracing::error!(
+                            "Failed to decrypt Steam API key: {e} — removing corrupted entry"
+                        );
                         let _ = db.delete_config("steam_api_key").await;
                         None
                     }
@@ -117,7 +138,13 @@ async fn main() {
     });
 
     // Build shared application state
-    let app_state = AppState::new(db, steam, config.insecure, config.encryption_secret.clone(), config.backfill_rate);
+    let app_state = AppState::new(
+        db,
+        steam,
+        config.insecure,
+        config.encryption_secret.clone(),
+        config.backfill_rate,
+    );
 
     // Kick off version check so the cache is warm before the first request
     {
@@ -176,7 +203,14 @@ async fn backfill_all_games(state: &AppState) {
         return;
     }
 
-    println!("{}", format!("Starting full history backfill for {} game(s)...", app_ids.len()).cyan());
+    println!(
+        "{}",
+        format!(
+            "Starting full history backfill for {} game(s)...",
+            app_ids.len()
+        )
+        .cyan()
+    );
 
     for app_id in app_ids {
         let token = state.start_backfill(app_id).await;
@@ -212,7 +246,9 @@ pub async fn backfill_game_history(
                     }
                 }
                 Err(e) => {
-                    tracing::warn!("Failed to fetch data for app {app_id} to discover min_date: {e}");
+                    tracing::warn!(
+                        "Failed to fetch data for app {app_id} to discover min_date: {e}"
+                    );
                     state.finish_backfill(app_id).await;
                     return;
                 }
@@ -231,7 +267,9 @@ pub async fn backfill_game_history(
 
     let yesterday = Utc::now().with_timezone(&Pacific).date_naive() - chrono::Duration::days(1);
     if min_date > yesterday {
-        tracing::debug!("app {app_id}: min_date {min_date} is not before yesterday, nothing to backfill");
+        tracing::debug!(
+            "app {app_id}: min_date {min_date} is not before yesterday, nothing to backfill"
+        );
         state.finish_backfill(app_id).await;
         return;
     }
@@ -265,7 +303,10 @@ pub async fn backfill_game_history(
     }
 
     let total = dates_to_fetch.len();
-    println!("{}", format!("  app {app_id}: backfilling {total} day(s) from {min_date_str}...").cyan());
+    println!(
+        "{}",
+        format!("  app {app_id}: backfilling {total} day(s) from {min_date_str}...").cyan()
+    );
 
     let mut backfilled = 0u32;
     let mut consecutive_failures = 0u32;
@@ -273,14 +314,21 @@ pub async fn backfill_game_history(
     for (i, date_str) in dates_to_fetch.iter().enumerate() {
         // Check cancellation
         if token.is_cancelled() {
-            println!("{}", format!("  app {app_id}: backfill cancelled (game untracked)").yellow());
+            println!(
+                "{}",
+                format!("  app {app_id}: backfill cancelled (game untracked)").yellow()
+            );
             return; // Don't call finish_backfill — game is being removed
         }
 
         match steam.fetch_wishlist_for_backfill(app_id, date_str).await {
             Ok(report) => {
                 let fetched_at = format!("{date_str}T23:59:59Z");
-                if let Err(e) = state.db.insert_backfill_snapshot(&report, &fetched_at).await {
+                if let Err(e) = state
+                    .db
+                    .insert_backfill_snapshot(&report, &fetched_at)
+                    .await
+                {
                     tracing::error!("Failed to store backfill for app {app_id} on {date_str}: {e}");
                 } else {
                     backfilled += 1;
@@ -317,7 +365,10 @@ pub async fn backfill_game_history(
 
                         // Check cancellation after pause
                         if token.is_cancelled() {
-                            println!("{}", format!("  app {app_id}: backfill cancelled during pause").yellow());
+                            println!(
+                                "{}",
+                                format!("  app {app_id}: backfill cancelled during pause").yellow()
+                            );
                             return;
                         }
 
@@ -325,7 +376,10 @@ pub async fn backfill_game_history(
                         match steam.fetch_wishlist_for_backfill(app_id, date_str).await {
                             Ok(report) => {
                                 let fetched_at = format!("{date_str}T23:59:59Z");
-                                let _ = state.db.insert_backfill_snapshot(&report, &fetched_at).await;
+                                let _ = state
+                                    .db
+                                    .insert_backfill_snapshot(&report, &fetched_at)
+                                    .await;
                                 let _ = state.db.mark_date_crawled(app_id, date_str).await;
                                 let _ = state.db.clear_failed_date(app_id, date_str).await;
                                 backfilled += 1;
@@ -344,12 +398,18 @@ pub async fn backfill_game_history(
 
         // Log progress every 50 dates
         if (i + 1) % 50 == 0 {
-            println!("{}", format!("  app {app_id}: backfilled {}/{total} dates...", i + 1).cyan());
+            println!(
+                "{}",
+                format!("  app {app_id}: backfilled {}/{total} dates...", i + 1).cyan()
+            );
         }
     }
 
     if backfilled > 0 {
-        println!("{}", format!("  app {app_id}: backfill complete — {backfilled} new day(s)").cyan());
+        println!(
+            "{}",
+            format!("  app {app_id}: backfill complete — {backfilled} new day(s)").cyan()
+        );
     } else {
         tracing::debug!("app {app_id}: no new data during backfill");
     }
@@ -435,7 +495,9 @@ async fn polling_loop(state: AppState, poll_interval_minutes: u64) {
 
                             // Check notification mode
                             let notification_mode = state.get_notification_mode().await;
-                            let is_real_anomaly = anomaly_result.is_anomalous && !anomaly_result.insufficient_data && !anomaly_result.error;
+                            let is_real_anomaly = anomaly_result.is_anomalous
+                                && !anomaly_result.insufficient_data
+                                && !anomaly_result.error;
                             let should_notify = if notification_mode == "anomalies_only" {
                                 if anomaly_result.error {
                                     tracing::warn!(
@@ -515,6 +577,5 @@ async fn polling_loop(state: AppState, poll_interval_minutes: u64) {
                 }
             }
         }
-
     }
 }

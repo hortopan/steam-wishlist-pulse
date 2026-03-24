@@ -30,7 +30,11 @@ impl IntoResponse for AppError {
             AppError::Json(_) => StatusCode::BAD_REQUEST,
             AppError::Other(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
-        (status, axum::Json(serde_json::json!({"error": self.to_string()}))).into_response()
+        (
+            status,
+            axum::Json(serde_json::json!({"error": self.to_string()})),
+        )
+            .into_response()
     }
 }
 

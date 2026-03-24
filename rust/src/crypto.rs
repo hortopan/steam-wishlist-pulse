@@ -1,6 +1,6 @@
 use aes_gcm::{
-    aead::{Aead, KeyInit},
     Aes256Gcm, Nonce,
+    aead::{Aead, KeyInit},
 };
 use hkdf::Hkdf;
 use secrecy::{ExposeSecret, SecretString};
@@ -142,7 +142,10 @@ mod tests {
         let secret = test_secret("test");
         let encrypted = encrypt(&secret, "data").unwrap();
         let raw = hex::decode(&encrypted).unwrap();
-        assert_eq!(raw[0], FORMAT_VERSION, "first byte should be the format version");
+        assert_eq!(
+            raw[0], FORMAT_VERSION,
+            "first byte should be the format version"
+        );
     }
 
     #[test]

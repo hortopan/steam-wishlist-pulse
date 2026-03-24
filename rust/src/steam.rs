@@ -254,11 +254,7 @@ impl SteamClient {
     }
 
     /// Shared implementation for fetching wishlist data (called after rate limiting).
-    async fn fetch_wishlist_inner(
-        &self,
-        app_id: u32,
-        date: &str,
-    ) -> AppResult<WishlistReport> {
+    async fn fetch_wishlist_inner(&self, app_id: u32, date: &str) -> AppResult<WishlistReport> {
         let api_key = self.api_key.read().await.clone();
         let resp = self
             .http
@@ -289,15 +285,17 @@ impl SteamClient {
 
         let data: WishlistApiResponse = serde_json::from_str(&body)?;
 
-        let resp_body = data
-            .response
-            .ok_or_else(|| AppError::other(format!("No wishlist data for app {app_id} on {date}")))?;
+        let resp_body = data.response.ok_or_else(|| {
+            AppError::other(format!("No wishlist data for app {app_id} on {date}"))
+        })?;
 
         let summary = match resp_body.wishlist_summary {
             Some(s) => s,
             None => {
                 return Err(AppError::other(match resp_body.app_min_date {
-                    Some(d) => format!("No data for app {app_id} on {date} (earliest available: {d})"),
+                    Some(d) => {
+                        format!("No data for app {app_id} on {date} (earliest available: {d})")
+                    }
                     None => format!("No wishlist data for app {app_id} on {date}"),
                 }));
             }

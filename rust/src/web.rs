@@ -114,7 +114,9 @@ fn check_and_record_attempt(
 
     if entry.len() >= MAX_LOGIN_ATTEMPTS {
         let oldest = entry[0];
-        let retry_after = window.as_secs().saturating_sub(now.duration_since(oldest).as_secs());
+        let retry_after = window
+            .as_secs()
+            .saturating_sub(now.duration_since(oldest).as_secs());
         return Err(retry_after);
     }
 
@@ -145,7 +147,13 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(db: Database, steam: Option<SteamClient>, insecure: bool, encryption_secret: Option<SecretString>, backfill_rate: f64) -> Self {
+    pub fn new(
+        db: Database,
+        steam: Option<SteamClient>,
+        insecure: bool,
+        encryption_secret: Option<SecretString>,
+        backfill_rate: f64,
+    ) -> Self {
         if insecure {
             tracing::warn!("Running with --insecure: cookies will not require HTTPS");
         }
@@ -302,7 +310,9 @@ impl AppState {
                             "UPDATE AVAILABLE:".bold().yellow(),
                             format!("v{current_version}").dimmed(),
                             format!("v{version}").green().bold(),
-                            "https://github.com/hortopan/steam-wishlist-pulse/releases/latest".cyan().underline()
+                            "https://github.com/hortopan/steam-wishlist-pulse/releases/latest"
+                                .cyan()
+                                .underline()
                         );
                     }
                     *cache.lock().await = Some((version, Instant::now()));
@@ -350,7 +360,9 @@ impl AppState {
             return secret;
         }
         let secret = generate_jwt_secret();
-        let store_value = self.encrypt_value(&secret).unwrap_or_else(|_| secret.clone());
+        let store_value = self
+            .encrypt_value(&secret)
+            .unwrap_or_else(|_| secret.clone());
         let _ = self.db.set_config(CONFIG_JWT_SECRET, &store_value).await;
         *cached = Some(secret.clone());
         secret
@@ -359,7 +371,9 @@ impl AppState {
     /// Rotate the JWT secret, invalidating all existing tokens.
     async fn rotate_jwt_secret(&self) {
         let secret = generate_jwt_secret();
-        let store_value = self.encrypt_value(&secret).unwrap_or_else(|_| secret.clone());
+        let store_value = self
+            .encrypt_value(&secret)
+            .unwrap_or_else(|_| secret.clone());
         let _ = self.db.set_config(CONFIG_JWT_SECRET, &store_value).await;
         *self.cached_jwt_secret.lock().await = Some(secret);
     }
@@ -401,7 +415,7 @@ impl AppState {
         let token = hex::encode(bytes);
         let mut builder = Cookie::build((CSRF_COOKIE, token))
             .path("/")
-            .http_only(false)   // JS must be able to read this
+            .http_only(false) // JS must be able to read this
             .same_site(SameSite::Lax)
             .max_age(Duration::days(7));
         if !self.insecure {
@@ -857,7 +871,10 @@ fn parse_app_id(input: &str) -> Result<u32, String> {
 
 // ── Route handlers ──────────────────────────────────────────────────
 
-async fn api_auth_status(State(state): State<AppState>, jar: CookieJar) -> (CookieJar, Json<AuthStatus>) {
+async fn api_auth_status(
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> (CookieJar, Json<AuthStatus>) {
     let setup_required = !state.passwords_configured().await;
     let session = state.get_session(&jar).await;
     let is_authenticated = session.is_some();
@@ -865,7 +882,10 @@ async fn api_auth_status(State(state): State<AppState>, jar: CookieJar) -> (Cook
     // Only expose version info to authenticated users
     let (version, latest_version) = if is_authenticated {
         let current_version = env!("CARGO_PKG_VERSION");
-        let latest = state.get_latest_version().await.filter(|v| v != current_version);
+        let latest = state
+            .get_latest_version()
+            .await
+            .filter(|v| v != current_version);
         (Some(current_version), latest)
     } else {
         (None, None)
@@ -875,13 +895,16 @@ async fn api_auth_status(State(state): State<AppState>, jar: CookieJar) -> (Cook
     let csrf_cookie = state.csrf_cookie();
     let jar = jar.add(csrf_cookie);
 
-    (jar, Json(AuthStatus {
-        authenticated: is_authenticated,
-        access_level: session.map(|s| s.access_level),
-        setup_required,
-        version,
-        latest_version,
-    }))
+    (
+        jar,
+        Json(AuthStatus {
+            authenticated: is_authenticated,
+            access_level: session.map(|s| s.access_level),
+            setup_required,
+            version,
+            latest_version,
+        }),
+    )
 }
 
 async fn api_login(
@@ -1191,11 +1214,7 @@ async fn api_game_detail(
         });
 
     // Get total count efficiently
-    let total_snapshots = state
-        .db
-        .get_snapshot_count(app_id)
-        .await
-        .unwrap_or(0);
+    let total_snapshots = state.db.get_snapshot_count(app_id).await.unwrap_or(0);
 
     Json(GameDetailResponse {
         app_id,
@@ -1285,102 +1304,97 @@ async fn api_game_chart(
 
     let anomaly_config = state.get_anomaly_config().await;
 
-    let anomaly_by_bucket: std::collections::HashMap<String, AnomalyMetrics> = if resolution == "raw" {
-        // For raw resolution, compute anomalies on individual raw snapshots (original behavior)
-        let lookback_secs = anomaly_config.lookback_days as i64 * 86400;
-        let lookback_since = (since - chrono::Duration::seconds(lookback_secs))
-            .format("%Y-%m-%dT%H:%M:%SZ")
-            .to_string();
+    let anomaly_by_bucket: std::collections::HashMap<String, AnomalyMetrics> =
+        if resolution == "raw" {
+            // For raw resolution, compute anomalies on individual raw snapshots (original behavior)
+            let lookback_secs = anomaly_config.lookback_days as i64 * 86400;
+            let lookback_since = (since - chrono::Duration::seconds(lookback_secs))
+                .format("%Y-%m-%dT%H:%M:%SZ")
+                .to_string();
 
-        let raw_snapshots = state
-            .db
-            .get_raw_snapshots_between(app_id, &lookback_since, &now_str)
-            .await
-            .unwrap_or_default();
+            let raw_snapshots = state
+                .db
+                .get_raw_snapshots_between(app_id, &lookback_since, &now_str)
+                .await
+                .unwrap_or_default();
 
-        let context_with_secs: Vec<(f64, &crate::db::ChartPoint)> = raw_snapshots
-            .iter()
-            .map(|p| (crate::db::label_to_epoch_secs(&p.label), p))
-            .collect();
+            let context_with_secs: Vec<(f64, &crate::db::ChartPoint)> = raw_snapshots
+                .iter()
+                .map(|p| (crate::db::label_to_epoch_secs(&p.label), p))
+                .collect();
 
-        let raw_anomalies: Vec<(&crate::db::ChartPoint, AnomalyMetrics)> = raw_snapshots
-            .iter()
-            .map(|p| {
+            let raw_anomalies: Vec<(&crate::db::ChartPoint, AnomalyMetrics)> = raw_snapshots
+                .iter()
+                .map(|p| {
+                    let metrics = compute_anomaly_for_chart_point(
+                        p,
+                        &context_with_secs,
+                        &anomaly_config,
+                        lookback_secs as f64,
+                    );
+                    (p, metrics)
+                })
+                .collect();
+
+            let mut map: std::collections::HashMap<String, AnomalyMetrics> =
+                std::collections::HashMap::new();
+            for (p, metrics) in &raw_anomalies {
+                let entry = map.entry(p.label.clone()).or_default();
+                entry.adds = entry.adds || metrics.adds;
+                entry.deletes = entry.deletes || metrics.deletes;
+                entry.purchases = entry.purchases || metrics.purchases;
+                entry.gifts = entry.gifts || metrics.gifts;
+                for desc in &metrics.descriptions {
+                    if !entry.descriptions.contains(desc) {
+                        entry.descriptions.push(desc.clone());
+                    }
+                }
+            }
+            map
+        } else {
+            // For aggregated resolutions, compute anomalies directly on aggregated chart points.
+            // Scale lookback so lookback_days means "number of context data points" at this resolution.
+            let secs_per_period: i64 = match resolution {
+                "weekly" => 7 * 86400,
+                "monthly" => 30 * 86400,
+                _ => 86400, // daily
+            };
+            let lookback_secs = anomaly_config.lookback_days as i64 * secs_per_period;
+            let lookback_since = (since - chrono::Duration::seconds(lookback_secs))
+                .format("%Y-%m-%dT%H:%M:%SZ")
+                .to_string();
+
+            // Fetch aggregated points with extended lookback for context
+            let context_points = state
+                .db
+                .get_chart_data(app_id, &lookback_since, resolution)
+                .await
+                .unwrap_or_default();
+
+            let context_with_secs: Vec<(f64, &crate::db::ChartPoint)> = context_points
+                .iter()
+                .map(|p| (crate::db::label_to_epoch_secs(&p.label), p))
+                .collect();
+
+            let mut map: std::collections::HashMap<String, AnomalyMetrics> =
+                std::collections::HashMap::new();
+            for p in &chart_points {
                 let metrics = compute_anomaly_for_chart_point(
                     p,
                     &context_with_secs,
                     &anomaly_config,
                     lookback_secs as f64,
                 );
-                (p, metrics)
-            })
-            .collect();
-
-        let mut map: std::collections::HashMap<String, AnomalyMetrics> =
-            std::collections::HashMap::new();
-        for (p, metrics) in &raw_anomalies {
-            let entry = map
-                .entry(p.label.clone())
-                .or_default();
-            entry.adds = entry.adds || metrics.adds;
-            entry.deletes = entry.deletes || metrics.deletes;
-            entry.purchases = entry.purchases || metrics.purchases;
-            entry.gifts = entry.gifts || metrics.gifts;
-            for desc in &metrics.descriptions {
-                if !entry.descriptions.contains(desc) {
-                    entry.descriptions.push(desc.clone());
-                }
+                map.insert(p.label.clone(), metrics);
             }
-        }
-        map
-    } else {
-        // For aggregated resolutions, compute anomalies directly on aggregated chart points.
-        // Scale lookback so lookback_days means "number of context data points" at this resolution.
-        let secs_per_period: i64 = match resolution {
-            "weekly" => 7 * 86400,
-            "monthly" => 30 * 86400,
-            _ => 86400, // daily
+            map
         };
-        let lookback_secs = anomaly_config.lookback_days as i64 * secs_per_period;
-        let lookback_since = (since - chrono::Duration::seconds(lookback_secs))
-            .format("%Y-%m-%dT%H:%M:%SZ")
-            .to_string();
-
-        // Fetch aggregated points with extended lookback for context
-        let context_points = state
-            .db
-            .get_chart_data(app_id, &lookback_since, resolution)
-            .await
-            .unwrap_or_default();
-
-        let context_with_secs: Vec<(f64, &crate::db::ChartPoint)> = context_points
-            .iter()
-            .map(|p| (crate::db::label_to_epoch_secs(&p.label), p))
-            .collect();
-
-        let mut map: std::collections::HashMap<String, AnomalyMetrics> =
-            std::collections::HashMap::new();
-        for p in &chart_points {
-            let metrics = compute_anomaly_for_chart_point(
-                p,
-                &context_with_secs,
-                &anomaly_config,
-                lookback_secs as f64,
-            );
-            map.insert(p.label.clone(), metrics);
-        }
-        map
-    };
 
     let points = chart_points
         .into_iter()
         .map(|p| {
-            let anomaly = anomaly_by_bucket
-                .get(&p.label)
-                .cloned()
-                .unwrap_or_default();
-            let is_anomaly =
-                anomaly.adds || anomaly.deletes || anomaly.purchases || anomaly.gifts;
+            let anomaly = anomaly_by_bucket.get(&p.label).cloned().unwrap_or_default();
+            let is_anomaly = anomaly.adds || anomaly.deletes || anomaly.purchases || anomaly.gifts;
             ChartPointResponse {
                 label: p.label,
                 adds: p.adds,
@@ -1587,9 +1601,7 @@ fn compute_anomaly_inner(
     }
 
     // Find the previous snapshot (the one just before this one in time)
-    let prev_idx = context
-        .iter()
-        .rposition(|(s, _)| *s < curr_secs);
+    let prev_idx = context.iter().rposition(|(s, _)| *s < curr_secs);
 
     let prev_idx = match prev_idx {
         Some(i) => i,
@@ -1610,59 +1622,67 @@ fn compute_anomaly_inner(
     }
 
     let days_elapsed = (curr_secs - prev_secs) / 86400.0;
-    let days_elapsed = if days_elapsed <= 0.0 { 1.0 } else { days_elapsed };
+    let days_elapsed = if days_elapsed <= 0.0 {
+        1.0
+    } else {
+        days_elapsed
+    };
 
-    let check_metric =
-        |name: &str, curr_val: i64, prev_val: i64, get_val: &dyn Fn(&crate::db::ChartPoint) -> i64| -> (bool, Option<String>) {
-            let raw_delta = curr_val - prev_val;
-            if raw_delta == 0 {
-                return (false, None);
-            }
-            if raw_delta.abs() < config.min_absolute {
-                return (false, None);
-            }
-            let current_rate = raw_delta as f64 / days_elapsed;
+    let check_metric = |name: &str,
+                        curr_val: i64,
+                        prev_val: i64,
+                        get_val: &dyn Fn(&crate::db::ChartPoint) -> i64|
+     -> (bool, Option<String>) {
+        let raw_delta = curr_val - prev_val;
+        if raw_delta == 0 {
+            return (false, None);
+        }
+        if raw_delta.abs() < config.min_absolute {
+            return (false, None);
+        }
+        let current_rate = raw_delta as f64 / days_elapsed;
 
-            let mut rates: Vec<f64> = window
-                .windows(2)
-                .filter_map(|w| {
-                    let d = (w[1].0 - w[0].0) / 86400.0;
-                    if d <= 0.0 {
-                        return None;
-                    }
-                    let raw = get_val(w[1].1) - get_val(w[0].1);
-                    Some(raw as f64 / d)
-                })
-                .collect();
-            if rates.len() < 3 {
-                return (false, None);
-            }
-            let median = crate::anomaly::f64_median_pub(&mut rates);
-            let mad = crate::anomaly::f64_mad_pub(&mut rates, median);
-            let effective_mad =
-                crate::anomaly::apply_mad_floor_pub(mad, median, config.mad_floor_pct);
-            let is_anomalous = if effective_mad == 0.0 {
-                (current_rate - median).abs() > f64::EPSILON
-            } else {
-                let deviation = current_rate - median;
-                let z = deviation.abs() / effective_mad;
-                if deviation >= 0.0 {
-                    z > config.sensitivity_up
-                } else {
-                    z > config.sensitivity_down
+        let mut rates: Vec<f64> = window
+            .windows(2)
+            .filter_map(|w| {
+                let d = (w[1].0 - w[0].0) / 86400.0;
+                if d <= 0.0 {
+                    return None;
                 }
-            };
-            if is_anomalous {
-                let desc = format_anomaly_description(name, current_rate, median);
-                (true, Some(desc))
+                let raw = get_val(w[1].1) - get_val(w[0].1);
+                Some(raw as f64 / d)
+            })
+            .collect();
+        if rates.len() < 3 {
+            return (false, None);
+        }
+        let median = crate::anomaly::f64_median_pub(&mut rates);
+        let mad = crate::anomaly::f64_mad_pub(&mut rates, median);
+        let effective_mad = crate::anomaly::apply_mad_floor_pub(mad, median, config.mad_floor_pct);
+        let is_anomalous = if effective_mad == 0.0 {
+            (current_rate - median).abs() > f64::EPSILON
+        } else {
+            let deviation = current_rate - median;
+            let z = deviation.abs() / effective_mad;
+            if deviation >= 0.0 {
+                z > config.sensitivity_up
             } else {
-                (false, None)
+                z > config.sensitivity_down
             }
         };
+        if is_anomalous {
+            let desc = format_anomaly_description(name, current_rate, median);
+            (true, Some(desc))
+        } else {
+            (false, None)
+        }
+    };
 
     let (adds_flag, adds_desc) = check_metric("Adds", adds, prev.adds, &|p| p.adds);
-    let (deletes_flag, deletes_desc) = check_metric("Deletes", deletes, prev.deletes, &|p| p.deletes);
-    let (purchases_flag, purchases_desc) = check_metric("Purchases", purchases, prev.purchases, &|p| p.purchases);
+    let (deletes_flag, deletes_desc) =
+        check_metric("Deletes", deletes, prev.deletes, &|p| p.deletes);
+    let (purchases_flag, purchases_desc) =
+        check_metric("Purchases", purchases, prev.purchases, &|p| p.purchases);
     let (gifts_flag, gifts_desc) = check_metric("Gifts", gifts, prev.gifts, &|p| p.gifts);
 
     let descriptions: Vec<String> = [adds_desc, deletes_desc, purchases_desc, gifts_desc]
@@ -1687,13 +1707,23 @@ fn format_anomaly_description(metric_name: &str, current_rate: f64, median: f64)
     if abs_median < 0.01 {
         // Baseline was essentially zero
         if current_rate > 0.0 {
-            format!("{metric_name} surged to {:.0}/day from near-zero baseline", abs_rate)
+            format!(
+                "{metric_name} surged to {:.0}/day from near-zero baseline",
+                abs_rate
+            )
         } else {
-            format!("{metric_name} dropped to {:.0}/day from near-zero baseline", abs_rate)
+            format!(
+                "{metric_name} dropped to {:.0}/day from near-zero baseline",
+                abs_rate
+            )
         }
     } else {
         let ratio = abs_rate / abs_median;
-        let direction = if current_rate > median { "above" } else { "below" };
+        let direction = if current_rate > median {
+            "above"
+        } else {
+            "below"
+        };
         if ratio >= 2.0 {
             format!(
                 "{metric_name} {:.0}× {direction} normal ({:.0}/day vs ~{:.0}/day)",
@@ -1812,10 +1842,7 @@ async fn api_admin_config_get(State(state): State<AppState>, jar: CookieJar) -> 
     .into_response()
 }
 
-async fn api_admin_health(
-    State(state): State<AppState>,
-    jar: CookieJar,
-) -> Response {
+async fn api_admin_health(State(state): State<AppState>, jar: CookieJar) -> Response {
     match state.get_session(&jar).await {
         Some(s) if s.access_level == AccessLevel::Admin => {}
         _ => return StatusCode::UNAUTHORIZED.into_response(),
@@ -1829,7 +1856,10 @@ async fn api_admin_health(
         .map(|v| !v.is_empty())
         .unwrap_or(false);
     let steam = if has_steam_key {
-        ServiceHealth { status: ServiceStatus::Ok, message: None }
+        ServiceHealth {
+            status: ServiceStatus::Ok,
+            message: None,
+        }
     } else {
         ServiceHealth {
             status: ServiceStatus::NotConfigured,
@@ -1843,7 +1873,10 @@ async fn api_admin_health(
         .map(|v| v == "true")
         .unwrap_or(false);
     let telegram = if !tg_enabled {
-        ServiceHealth { status: ServiceStatus::Disabled, message: None }
+        ServiceHealth {
+            status: ServiceStatus::Disabled,
+            message: None,
+        }
     } else {
         let has_token = config
             .get(CONFIG_TELEGRAM_BOT_TOKEN)
@@ -1858,9 +1891,10 @@ async fn api_admin_health(
             // Check if the bot task is still running
             let handle = state.telegram_handle.lock().await;
             match &*handle {
-                Some(h) if !h.is_finished() => {
-                    ServiceHealth { status: ServiceStatus::Ok, message: None }
-                }
+                Some(h) if !h.is_finished() => ServiceHealth {
+                    status: ServiceStatus::Ok,
+                    message: None,
+                },
                 Some(_) => ServiceHealth {
                     status: ServiceStatus::Error,
                     message: Some("Telegram bot has stopped unexpectedly".into()),
@@ -1879,7 +1913,10 @@ async fn api_admin_health(
         .map(|v| v == "true")
         .unwrap_or(false);
     let discord = if !dc_enabled {
-        ServiceHealth { status: ServiceStatus::Disabled, message: None }
+        ServiceHealth {
+            status: ServiceStatus::Disabled,
+            message: None,
+        }
     } else {
         let has_token = config
             .get(CONFIG_DISCORD_BOT_TOKEN)
@@ -1893,9 +1930,10 @@ async fn api_admin_health(
         } else {
             let handle = state.discord_handle.lock().await;
             match &*handle {
-                Some(h) if !h.is_finished() => {
-                    ServiceHealth { status: ServiceStatus::Ok, message: None }
-                }
+                Some(h) if !h.is_finished() => ServiceHealth {
+                    status: ServiceStatus::Ok,
+                    message: None,
+                },
                 Some(_) => ServiceHealth {
                     status: ServiceStatus::Error,
                     message: Some("Discord bot has stopped unexpectedly".into()),
@@ -1908,7 +1946,12 @@ async fn api_admin_health(
         }
     };
 
-    Json(HealthResponse { steam, telegram, discord }).into_response()
+    Json(HealthResponse {
+        steam,
+        telegram,
+        discord,
+    })
+    .into_response()
 }
 
 async fn api_admin_config_update(
@@ -1951,7 +1994,11 @@ async fn api_admin_config_update(
                         .into_response();
                 }
             };
-            if let Err(e) = state.db.set_config(CONFIG_STEAM_API_KEY, &store_value).await {
+            if let Err(e) = state
+                .db
+                .set_config(CONFIG_STEAM_API_KEY, &store_value)
+                .await
+            {
                 return e.into_response();
             }
             state.ensure_steam(&key).await;
@@ -1982,7 +2029,11 @@ async fn api_admin_config_update(
                         .into_response();
                 }
             };
-            if let Err(e) = state.db.set_config(CONFIG_TELEGRAM_BOT_TOKEN, &store_value).await {
+            if let Err(e) = state
+                .db
+                .set_config(CONFIG_TELEGRAM_BOT_TOKEN, &store_value)
+                .await
+            {
                 return e.into_response();
             }
         }
@@ -2042,7 +2093,11 @@ async fn api_admin_config_update(
                         .into_response();
                 }
             };
-            if let Err(e) = state.db.set_config(CONFIG_DISCORD_BOT_TOKEN, &store_value).await {
+            if let Err(e) = state
+                .db
+                .set_config(CONFIG_DISCORD_BOT_TOKEN, &store_value)
+                .await
+            {
                 return e.into_response();
             }
         }
@@ -2131,7 +2186,10 @@ async fn api_admin_config_update(
         }
         if let Err(e) = state
             .db
-            .set_config(CONFIG_ANOMALY_SENSITIVITY_DOWN, &sensitivity_down.to_string())
+            .set_config(
+                CONFIG_ANOMALY_SENSITIVITY_DOWN,
+                &sensitivity_down.to_string(),
+            )
             .await
         {
             return e.into_response();
@@ -2142,7 +2200,9 @@ async fn api_admin_config_update(
         if !(0.0..=1.0).contains(&mad_floor_pct) {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": "MAD floor percentage must be between 0 and 1." })),
+                Json(
+                    serde_json::json!({ "error": "MAD floor percentage must be between 0 and 1." }),
+                ),
             )
                 .into_response();
         }
@@ -2322,7 +2382,8 @@ async fn api_admin_track_game(
     let app_id = match parse_app_id(&req.input) {
         Ok(id) => id,
         Err(e) => {
-            return Json(serde_json::json!({ "success": false, "error": e.to_string() })).into_response();
+            return Json(serde_json::json!({ "success": false, "error": e.to_string() }))
+                .into_response();
         }
     };
 
@@ -2390,7 +2451,9 @@ async fn api_admin_track_game(
             }))
             .into_response()
         }
-        Err(e) => Json(serde_json::json!({ "success": false, "error": e.to_string() })).into_response(),
+        Err(e) => {
+            Json(serde_json::json!({ "success": false, "error": e.to_string() })).into_response()
+        }
     }
 }
 
@@ -2418,7 +2481,9 @@ async fn api_admin_untrack_game(
             "error": format!("App {} was not being tracked", req.app_id)
         }))
         .into_response(),
-        Err(e) => Json(serde_json::json!({ "success": false, "error": e.to_string() })).into_response(),
+        Err(e) => {
+            Json(serde_json::json!({ "success": false, "error": e.to_string() })).into_response()
+        }
     }
 }
 
@@ -2600,13 +2665,13 @@ async fn debug_test_change(
 /// match the `X-CSRF-Token` request header. Both are opaque random tokens
 /// set by the server — a cross-origin attacker cannot read the cookie to
 /// forge the header.
-async fn csrf_middleware(
-    req: axum::extract::Request,
-    next: axum::middleware::Next,
-) -> Response {
+async fn csrf_middleware(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
     let dominated = matches!(
         *req.method(),
-        axum::http::Method::POST | axum::http::Method::PUT | axum::http::Method::DELETE | axum::http::Method::PATCH
+        axum::http::Method::POST
+            | axum::http::Method::PUT
+            | axum::http::Method::DELETE
+            | axum::http::Method::PATCH
     );
 
     // Auth endpoints are exempt: login requires a password (natural CSRF barrier),
@@ -2666,7 +2731,10 @@ pub async fn run_web(bind_addr: String, state: AppState) {
         .route("/api/wishlist/{app_id}/detail", get(api_game_detail))
         .route("/api/wishlist/{app_id}/chart", get(api_game_chart))
         .route("/api/wishlist/{app_id}/history", get(api_game_history))
-        .route("/api/wishlist/{app_id}/countries/{snapshot_id}", get(api_snapshot_countries))
+        .route(
+            "/api/wishlist/{app_id}/countries/{snapshot_id}",
+            get(api_snapshot_countries),
+        )
         // Admin routes
         .route("/api/admin/config", get(api_admin_config_get))
         .route("/api/admin/config", post(api_admin_config_update))
