@@ -2,11 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.1.6] - 2026-03-24
 
 ### Bug Fixes
 
 - Show there's no data for steam for today
+
+### Other
+
+- Updated changelog
 
 ### Version Bumps
 

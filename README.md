@@ -12,7 +12,7 @@ Single binary (~4 MB) for **Windows, macOS, and Linux** (including ARM). Built-i
 
 > **1.** Install:
 > ```bash
-> curl --proto '=https' --tlsv1.2 -LsSf https://github.com/hortopan/steam-wishlist-pulse/releases/download/v0.1.5/wishlist-pulse-installer.sh | sh
+> curl --proto '=https' --tlsv1.2 -LsSf https://github.com/hortopan/steam-wishlist-pulse/releases/download/v0.1.6/wishlist-pulse-installer.sh | sh
 > ```
 > Or via [Homebrew](#homebrew), [Docker](#docker), or [download a binary](https://github.com/hortopan/steam-wishlist-pulse/releases/latest).
 >
@@ -98,7 +98,7 @@ The detector uses a **modified z-score** (Median + MAD) over the lookback window
 ### Shell script (macOS / Linux)
 
 ```bash
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/hortopan/steam-wishlist-pulse/releases/download/v0.1.5/wishlist-pulse-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/hortopan/steam-wishlist-pulse/releases/download/v0.1.6/wishlist-pulse-installer.sh | sh
 ```
 
 ### Homebrew
