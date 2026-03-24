@@ -228,6 +228,10 @@ A single Rust binary running four concurrent subsystems: a **polling loop** that
 
 ---
 
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for a list of notable changes.
+
 ## License
 
 MIT — see [LICENSE](LICENSE) for details.

@@ -691,16 +691,25 @@ impl Database {
         Ok(count as usize)
     }
 
-    /// Get all-time totals (sum of all snapshots) for a single game.
+    /// Get all-time totals (sum of daily maximums) for a single game.
+    /// Uses MAX() per date to avoid double-counting when multiple intra-day
+    /// snapshots exist for the same date.
     pub async fn get_game_totals(&self, app_id: u32) -> AppResult<Option<GameTotals>> {
         let conn = self.pool.get().await;
         let mut stmt = conn.prepare(
-            "SELECT COALESCE(SUM(adds), 0),
-                    COALESCE(SUM(deletes), 0),
-                    COALESCE(SUM(purchases), 0),
-                    COALESCE(SUM(gifts), 0)
-             FROM wishlist_snapshots
-             WHERE app_id = ?1",
+            "SELECT COALESCE(SUM(daily_adds), 0),
+                    COALESCE(SUM(daily_deletes), 0),
+                    COALESCE(SUM(daily_purchases), 0),
+                    COALESCE(SUM(daily_gifts), 0)
+             FROM (
+                SELECT MAX(adds) as daily_adds,
+                       MAX(deletes) as daily_deletes,
+                       MAX(purchases) as daily_purchases,
+                       MAX(gifts) as daily_gifts
+                FROM wishlist_snapshots
+                WHERE app_id = ?1
+                GROUP BY date
+             )",
         )?;
         let result = stmt.query_row([app_id], |row| {
             Ok(GameTotals {
@@ -717,16 +726,26 @@ impl Database {
         }
     }
 
-    /// Get all-time totals (sum of all snapshots) for every tracked game.
+    /// Get all-time totals (sum of daily maximums) for every tracked game.
+    /// Uses MAX() per (app_id, date) to avoid double-counting when multiple
+    /// intra-day snapshots exist for the same date.
     pub async fn get_all_game_totals(&self) -> AppResult<HashMap<u32, GameTotals>> {
         let conn = self.pool.get().await;
         let mut stmt = conn.prepare(
             "SELECT app_id,
-                    COALESCE(SUM(adds), 0),
-                    COALESCE(SUM(deletes), 0),
-                    COALESCE(SUM(purchases), 0),
-                    COALESCE(SUM(gifts), 0)
-             FROM wishlist_snapshots
+                    COALESCE(SUM(daily_adds), 0),
+                    COALESCE(SUM(daily_deletes), 0),
+                    COALESCE(SUM(daily_purchases), 0),
+                    COALESCE(SUM(daily_gifts), 0)
+             FROM (
+                SELECT app_id,
+                       MAX(adds) as daily_adds,
+                       MAX(deletes) as daily_deletes,
+                       MAX(purchases) as daily_purchases,
+                       MAX(gifts) as daily_gifts
+                FROM wishlist_snapshots
+                GROUP BY app_id, date
+             )
              GROUP BY app_id",
         )?;
         let map = stmt

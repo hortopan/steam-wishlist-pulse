@@ -2,17 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.1.4] - 2026-03-24
 
 ### Features
 
 - Added scripts folder, fake data
 - Added full history synced from steam and various fixes and improvements overall
+- Added Milestone mode / you can now celebrate, maybe make a screenshot or just put it on monitor i guess
+
+### Other
+
+- Added changelog proper + some fixes
 
 ### Documentation
 
 - Updated install version
 - Improved readme
+- Updated readme
+
+### Styling
+
+- Various visual improvements dashboard
 
 ## [0.1.3] - 2026-03-23
 
