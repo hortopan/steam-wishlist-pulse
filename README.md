@@ -1,8 +1,10 @@
 ![Steam Wishlist Pulse](media/github_header_image.png)
 
-**Stop refreshing Steamworks.** Wishlist Pulse monitors your Steam wishlist numbers via the official [Wishlist Data API](https://steamcommunity.com/groups/steamworks/announcements/detail/499474120884358024) and pushes changes — adds, removes, purchases, gifts — straight to Telegram and Discord so you don't have to keep checking.
+**A wishlist monitoring tool for game developers publishing on Steam.**
 
-Single binary (~4 MB) for **Windows, macOS, and Linux** (including ARM). Built-in web dashboard, SQLite storage, minimal RAM — runs happily on a Raspberry Pi.
+**Stop refreshing Steamworks.** Wishlist Pulse syncs your complete wishlist history from Steam's official [Wishlist Data API](https://steamcommunity.com/groups/steamworks/announcements/detail/499474120884358024), detects anomalies in real time, and pushes what matters — adds, removes, purchases, gifts, regional surges — straight to Telegram and Discord. Spot the impact of a trailer drop within hours, catch unexpected regional spikes after an influencer mention, and build a full timeline of every game you're tracking — all without opening Steamworks once.
+
+Single binary (~4 MB) for **Windows, macOS, and Linux** (including ARM). Built-in web dashboard with charts and anomaly highlights, SQLite storage, minimal RAM — runs happily on a Raspberry Pi.
 
 ---
 
@@ -32,7 +34,7 @@ Single binary (~4 MB) for **Windows, macOS, and Linux** (including ARM). Built-i
 - **Anomaly detection** — highlights unusual activity using a modified z-score algorithm so you can cut through the noise and catch what matters
 - **Configurable alert modes** — receive every update or only anomalies, with four sensitivity presets (Relaxed → Very Sensitive) plus full custom tuning
 - **Track multiple games** from a single instance
-- **Historical data** with configurable retention for spotting trends
+- **Full historical data** synced from Steam for spotting trends
 - **Web dashboard** — manage games, view stats, configure alerts visually
 - **Telegram & Discord bot commands** — track/untrack games and manage subscriptions from chat
 - **Two access levels** — Admin (full control) and Read-only (dashboard view)
@@ -48,7 +50,7 @@ A built-in admin panel served from the same binary — no separate deploy:
 - View all tracked games with latest stats and store images
 - Add/remove games by App ID or Steam store URL
 - Configure Steam API key and bot tokens
-- Manage channel subscriptions and data retention
+- Manage channel subscriptions
 - Configure anomaly detection sensitivity and notification preferences
 - Secured with Argon2 password hashing, JWT sessions, rate-limited login, and HTTPS cookies
 
@@ -155,7 +157,7 @@ Options can be set via CLI flags, environment variables, or both (passwords are 
 | `--insecure`              | —                       | `false`                                 | Disable HTTPS cookie requirement (dev only) |
 | —                         | `ENCRYPTION_SECRET`     | *(none)*                                | Passphrase for encrypting sensitive data at rest |
 
-Everything else — API keys, Telegram config, tracked games, retention — is managed through the dashboard.
+Everything else — API keys, Telegram config, tracked games — is managed through the dashboard.
 
 <details>
 <summary><strong>HTTPS & cookies</strong></summary>
