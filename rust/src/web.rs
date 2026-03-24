@@ -1321,7 +1321,7 @@ async fn api_game_chart(
         for (p, metrics) in &raw_anomalies {
             let entry = map
                 .entry(p.label.clone())
-                .or_insert_with(AnomalyMetrics::default);
+                .or_default();
             entry.adds = entry.adds || metrics.adds;
             entry.deletes = entry.deletes || metrics.deletes;
             entry.purchases = entry.purchases || metrics.purchases;
@@ -1571,6 +1571,7 @@ fn compute_anomaly_for_chart_point(
 }
 
 /// Shared anomaly detection logic.
+#[allow(clippy::too_many_arguments)]
 fn compute_anomaly_inner(
     curr_secs: f64,
     adds: i64,
@@ -2138,7 +2139,7 @@ async fn api_admin_config_update(
     }
 
     if let Some(mad_floor_pct) = req.anomaly_mad_floor_pct {
-        if mad_floor_pct < 0.0 || mad_floor_pct > 1.0 {
+        if !(0.0..=1.0).contains(&mad_floor_pct) {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({ "error": "MAD floor percentage must be between 0 and 1." })),
