@@ -150,7 +150,7 @@
                 <span
                   class="changed-at"
                   title={new Date(game.changed_at).toLocaleString()}
-                  >· last updated {timeAgo(game.changed_at, now)}</span
+                  >· latest data {timeAgo(game.changed_at, now)}</span
                 >
               {/if}
             {:else}

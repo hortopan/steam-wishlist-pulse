@@ -268,7 +268,7 @@
         <span class="hero-appid">App ID: {detail.app_id}</span>
         {#if detail.latest?.changed_at}
           <span class="hero-updated"
-            >Last updated {timeAgo(detail.latest.changed_at, now)}</span
+            >Latest data {timeAgo(detail.latest.changed_at, now)}</span
           >
         {/if}
         <div class="hero-links">
@@ -446,13 +446,6 @@
                   <td>
                     {#if entry.is_anomaly}<span class="anomaly-badge" title="Anomalous change detected">&#9888;</span>{/if}
                     {entry.date.split("T")[0]}
-                    {#if entry.is_anomaly && entry.anomaly_metrics?.descriptions?.length}
-                      <div class="anomaly-detail">
-                        {#each entry.anomaly_metrics.descriptions as desc}
-                          <div class="anomaly-detail-line">{desc}</div>
-                        {/each}
-                      </div>
-                    {/if}
                   </td>
                   <td class="num adds">{entry.adds.toLocaleString()}</td>
                   <td class="num deletes">{entry.deletes.toLocaleString()}</td>
@@ -483,6 +476,17 @@
                     </button>
                   </td>
                 </tr>
+                {#if entry.is_anomaly && entry.anomaly_metrics?.descriptions?.length}
+                  <tr class="anomaly-detail-row">
+                    <td colspan="10">
+                      <div class="anomaly-detail">
+                        {#each entry.anomaly_metrics.descriptions as desc}
+                          <span class="anomaly-detail-line">{desc}</span>
+                        {/each}
+                      </div>
+                    </td>
+                  </tr>
+                {/if}
                 {#if expandedCountries.has(entry.snapshot_id)}
                   {@const countries = expandedCountries.get(entry.snapshot_id) ?? []}
                   {@const sorted = [...countries].sort((a, b) => b.adds - a.adds)}
@@ -622,8 +626,8 @@
     bottom: 0;
     left: 0;
     right: 0;
-    padding: 2rem 1.5rem 1.25rem;
-    background: linear-gradient(transparent, rgba(0, 0, 0, 0.85));
+    padding: 2.5rem 1.5rem 1.25rem;
+    background: linear-gradient(transparent 0%, rgba(0, 0, 0, 0.4) 30%, rgba(0, 0, 0, 0.9) 100%);
     display: flex;
     flex-direction: column;
     gap: 0.25rem;
@@ -633,17 +637,37 @@
     font-size: 1.75rem;
     font-weight: 700;
     line-height: 1.2;
-    text-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+    color: #fff;
+    text-shadow:
+      -1px -1px 0 rgba(0, 0, 0, 0.6),
+       1px -1px 0 rgba(0, 0, 0, 0.6),
+      -1px  1px 0 rgba(0, 0, 0, 0.6),
+       1px  1px 0 rgba(0, 0, 0, 0.6),
+       0 2px 8px rgba(0, 0, 0, 0.7);
   }
 
   .hero-appid {
     font-size: 0.8rem;
-    color: var(--text-muted);
+    color: rgba(255, 255, 255, 0.85);
+    text-shadow:
+      -1px -1px 0 rgba(0, 0, 0, 0.7),
+       1px -1px 0 rgba(0, 0, 0, 0.7),
+      -1px  1px 0 rgba(0, 0, 0, 0.7),
+       1px  1px 0 rgba(0, 0, 0, 0.7),
+       0 2px 6px rgba(0, 0, 0, 0.8),
+       0 0 12px rgba(0, 0, 0, 0.5);
   }
 
   .hero-updated {
     font-size: 0.8rem;
     color: var(--accent);
+    text-shadow:
+      -1px -1px 0 rgba(0, 0, 0, 0.7),
+       1px -1px 0 rgba(0, 0, 0, 0.7),
+      -1px  1px 0 rgba(0, 0, 0, 0.7),
+       1px  1px 0 rgba(0, 0, 0, 0.7),
+       0 2px 6px rgba(0, 0, 0, 0.8),
+       0 0 12px rgba(0, 0, 0, 0.5);
   }
 
   .hero-links {
@@ -658,17 +682,20 @@
     align-items: center;
     gap: 0.35rem;
     font-size: 0.78rem;
-    color: var(--text-muted);
-    background: rgba(255, 255, 255, 0.1);
+    color: rgba(255, 255, 255, 0.9);
+    background: rgba(0, 0, 0, 0.5);
+    backdrop-filter: blur(4px);
     padding: 0.3rem 0.65rem;
     border-radius: 0.375rem;
+    border: 1px solid rgba(255, 255, 255, 0.15);
     text-decoration: none;
-    transition: background 0.2s, color 0.2s;
+    transition: background 0.2s, color 0.2s, border-color 0.2s;
   }
 
   .hero-link:hover {
-    background: rgba(255, 255, 255, 0.2);
-    color: var(--text);
+    background: rgba(0, 0, 0, 0.65);
+    color: #fff;
+    border-color: rgba(255, 255, 255, 0.3);
   }
 
   /* Stats */
@@ -1013,14 +1040,27 @@
     cursor: help;
   }
 
+  .anomaly-detail-row td {
+    padding-top: 0.25rem !important;
+    padding-bottom: 0.6rem !important;
+    padding-left: 1rem !important;
+    border-top: none !important;
+    background: rgba(239, 68, 68, 0.06);
+    border-left: 3px solid var(--red);
+  }
+
   .anomaly-detail {
-    margin-top: 0.2rem;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem 1rem;
+    padding: 0.25rem 0;
   }
 
   .anomaly-detail-line {
     font-size: 0.75rem;
     color: var(--red);
     opacity: 0.85;
+    line-height: 1.4;
   }
 
   .history-table tbody tr:hover {
