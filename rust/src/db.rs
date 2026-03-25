@@ -282,7 +282,9 @@ impl Database {
         })();
         match &result {
             Ok(_) => conn.execute_batch("COMMIT")?,
-            Err(_) => { let _ = conn.execute_batch("ROLLBACK"); }
+            Err(_) => {
+                let _ = conn.execute_batch("ROLLBACK");
+            }
         }
         result
     }
@@ -634,7 +636,9 @@ impl Database {
 
         match &result {
             Ok(_) => conn.execute_batch("COMMIT")?,
-            Err(_) => { let _ = conn.execute_batch("ROLLBACK"); }
+            Err(_) => {
+                let _ = conn.execute_batch("ROLLBACK");
+            }
         }
 
         result
@@ -794,7 +798,9 @@ impl Database {
         })();
         match &result {
             Ok(_) => conn.execute_batch("COMMIT")?,
-            Err(_) => { let _ = conn.execute_batch("ROLLBACK"); }
+            Err(_) => {
+                let _ = conn.execute_batch("ROLLBACK");
+            }
         }
         result
     }

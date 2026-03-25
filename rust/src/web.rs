@@ -2997,10 +2997,7 @@ async fn api_headers_middleware(
     if is_api {
         let headers = resp.headers_mut();
         headers.insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
-        headers.insert(
-            header::X_CONTENT_TYPE_OPTIONS,
-            "nosniff".parse().unwrap(),
-        );
+        headers.insert(header::X_CONTENT_TYPE_OPTIONS, "nosniff".parse().unwrap());
     }
     resp
 }

@@ -290,19 +290,23 @@ pub async fn backfill_game_history(
 
     // For full re-syncs, clear progress *after* validating inputs so we don't
     // lose data if the backfill would have exited early.
-    if sync_type == "full" {
-        if let Err(e) = state.db.clear_sync_progress(app_id).await {
-            tracing::error!("Failed to clear sync progress for app {app_id}: {e}");
-            state.cancel_backfill_token(app_id).await;
-            return;
-        }
+    if sync_type == "full"
+        && let Err(e) = state.db.clear_sync_progress(app_id).await
+    {
+        tracing::error!("Failed to clear sync progress for app {app_id}: {e}");
+        state.cancel_backfill_token(app_id).await;
+        return;
     }
 
     // 2. Load already-crawled and failed dates
     // For full re-syncs, only check crawled_dates (not wishlist_snapshots) so
     // we re-fetch all dates and discover any newly available historical data.
     let include_snapshots = sync_type != "full";
-    let crawled_dates = match state.db.get_crawled_dates_for_game(app_id, include_snapshots).await {
+    let crawled_dates = match state
+        .db
+        .get_crawled_dates_for_game(app_id, include_snapshots)
+        .await
+    {
         Ok(dates) => dates,
         Err(e) => {
             tracing::error!("Failed to get crawled dates for app {app_id}: {e}");
