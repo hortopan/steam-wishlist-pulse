@@ -25,6 +25,8 @@
   // Sync confirmation modal state
   let confirmSync = $state<{ appId: number; name: string } | null>(null);
   let syncRequesting = $state(false);
+  // Track app IDs that just had a sync requested — prevents re-triggering before backend reflects cooldown
+  let recentlySynced = $state<Set<number>>(new Set());
 
   async function loadTrackedGames() {
     trackingLoading = true;
@@ -43,6 +45,14 @@
     pollTimer = setInterval(async () => {
       try {
         trackedGames = await api<TrackedGame[]>('/admin/games');
+        // Clear local sync guard once backend confirms sync finished.
+        // The backend now checks both DB state and in-memory token for is_syncing,
+        // so !is_syncing reliably means the sync has completed or failed.
+        for (const g of trackedGames) {
+          if (recentlySynced.has(g.app_id) && !g.is_syncing) {
+            recentlySynced = new Set([...recentlySynced].filter(id => id !== g.app_id));
+          }
+        }
         // Stop polling if no games are syncing
         if (!trackedGames.some(g => g.is_syncing)) {
           stopPolling();
@@ -129,7 +139,12 @@
         trackedGames = trackedGames.map(g =>
           g.app_id === appId ? { ...g, is_syncing: true, sync_progress_crawled: 0, sync_progress_total: 0 } : g
         );
-        await loadTrackedGames();
+        // Prevent re-triggering sync until backend cooldown kicks in
+        recentlySynced = new Set([...recentlySynced, appId]);
+        // Start polling — delay the first server fetch briefly so the spawned
+        // backfill task has time to record its start in the DB, avoiding a
+        // flicker where the server briefly reports is_syncing=false.
+        startPolling();
       } else {
         showToast('error', data.error || 'Failed to start sync');
       }
@@ -157,6 +172,8 @@
     stopPolling();
   });
 </script>
+
+<svelte:window onkeydown={(e) => { if (e.key === 'Escape' && confirmSync) cancelSync(); }} />
 
 <section class="config-section">
   <h2>Track a Game</h2>
@@ -212,7 +229,7 @@
             <span class="game-id">ID: {game.app_id}</span>
             {#if game.is_syncing}
               <div class="sync-status">
-                <span class="sync-label">Syncing {game.sync_progress_crawled}/{game.sync_progress_total} days</span>
+                <span class="sync-label">Syncing {Math.min(game.sync_progress_crawled, game.sync_progress_total)}/{game.sync_progress_total} days</span>
                 <div class="sync-progress-bar">
                   <div class="sync-progress-fill" style="width: {syncProgressPct(game)}%"></div>
                 </div>
@@ -223,8 +240,8 @@
             <button
               class="sync-btn"
               onclick={() => requestSync(game.app_id, game.name)}
-              disabled={trackingAction || game.is_syncing || game.cooldown_active}
-              title={game.is_syncing ? 'Sync in progress' : game.cooldown_active ? 'Recently synced — please wait before requesting another full sync' : 'Re-sync all historical wishlist data'}
+              disabled={trackingAction || game.is_syncing || game.cooldown_active || recentlySynced.has(game.app_id)}
+              title={game.is_syncing ? 'Sync in progress' : (game.cooldown_active || recentlySynced.has(game.app_id)) ? 'Recently synced — please wait before requesting another full sync' : 'Re-sync all historical wishlist data'}
             >
               {#if game.is_syncing}
                 Syncing...
@@ -252,7 +269,7 @@
 
 {#if confirmSync}
   <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
-  <div class="modal-overlay" onkeydown={(e) => e.key === 'Escape' && cancelSync()} onclick={cancelSync}>
+  <div class="modal-overlay" onclick={cancelSync} onkeydown={(e) => e.key === 'Escape' && cancelSync()}>
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div class="modal-box" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
       <h3>Confirm Full Sync</h3>

@@ -192,6 +192,11 @@ impl AppState {
         self.encryption_secret.is_some()
     }
 
+    /// Check whether a backfill is currently running for a game.
+    pub async fn is_backfill_running(&self, app_id: u32) -> bool {
+        self.backfill_tokens.lock().await.contains_key(&app_id)
+    }
+
     /// Create a cancellation token for a backfill task and store it.
     /// If a backfill is already running for this app, it is cancelled first.
     pub async fn start_backfill(&self, app_id: u32) -> tokio_util::sync::CancellationToken {
@@ -459,7 +464,11 @@ impl AppState {
 
     /// Build a SyncStatusResponse for a single game by combining DB state with live progress.
     async fn build_sync_status(&self, sync_row: &crate::db::GameSyncRow) -> SyncStatusResponse {
-        let is_syncing = sync_row.status == "in_progress";
+        // Check both DB state AND in-memory token — there is a window between
+        // token insertion (sync accepted) and start_sync() writing to the DB
+        // where only the token reflects the true running state.
+        let is_syncing =
+            sync_row.status == "in_progress" || self.is_backfill_running(sync_row.app_id).await;
         let progress_crawled = if is_syncing {
             self.db
                 .get_crawled_dates_count(sync_row.app_id)
@@ -2462,7 +2471,9 @@ async fn api_admin_tracked_games(State(state): State<AppState>, jar: CookieJar) 
                 status.cooldown_active,
             )
         } else {
-            (false, None, 0, 0, None, false)
+            // No DB row yet — check in-memory token for early backfill phase
+            let running = state.is_backfill_running(id).await;
+            (running, None, 0, 0, None, false)
         };
 
         games.push(TrackedGameEntry {
@@ -2620,10 +2631,12 @@ async fn api_sync_status(State(state): State<AppState>, jar: CookieJar) -> Respo
         if let Some(row) = sync_rows.iter().find(|r| r.app_id == *id) {
             statuses.push(state.build_sync_status(row).await);
         } else {
-            // No sync row — game has never been synced or was synced before this feature
+            // No sync row — game has never been synced or was synced before this feature.
+            // Still check in-memory token: the backfill task may be running but
+            // hasn't called start_sync() yet.
             statuses.push(SyncStatusResponse {
                 app_id: *id,
-                is_syncing: false,
+                is_syncing: state.is_backfill_running(*id).await,
                 sync_type: None,
                 started_at: None,
                 completed_at: None,

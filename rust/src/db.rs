@@ -519,13 +519,17 @@ impl Database {
     pub async fn get_crawled_dates_for_game(
         &self,
         app_id: u32,
+        include_snapshots: bool,
     ) -> AppResult<std::collections::HashSet<String>> {
         let conn = self.pool.get().await;
-        let mut stmt = conn.prepare(
+        let query = if include_snapshots {
             "SELECT DISTINCT date FROM wishlist_snapshots WHERE app_id = ?1
              UNION
-             SELECT date FROM crawled_dates WHERE app_id = ?1",
-        )?;
+             SELECT date FROM crawled_dates WHERE app_id = ?1"
+        } else {
+            "SELECT date FROM crawled_dates WHERE app_id = ?1"
+        };
+        let mut stmt = conn.prepare(query)?;
         let dates = stmt
             .query_map([app_id], |row| row.get::<_, String>(0))?
             .collect::<Result<std::collections::HashSet<String>, _>>()?;

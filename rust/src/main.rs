@@ -213,6 +213,11 @@ async fn backfill_all_games(state: &AppState) {
     );
 
     for app_id in app_ids {
+        // Skip if a manually-triggered sync is already in progress
+        if state.is_backfill_running(app_id).await {
+            tracing::debug!("app {app_id}: skipping startup backfill — sync already in progress");
+            continue;
+        }
         let token = state.start_backfill(app_id).await;
         backfill_game_history(state, &steam, app_id, token, "auto", "system").await;
     }
@@ -294,7 +299,10 @@ pub async fn backfill_game_history(
     }
 
     // 2. Load already-crawled and failed dates
-    let crawled_dates = match state.db.get_crawled_dates_for_game(app_id).await {
+    // For full re-syncs, only check crawled_dates (not wishlist_snapshots) so
+    // we re-fetch all dates and discover any newly available historical data.
+    let include_snapshots = sync_type != "full";
+    let crawled_dates = match state.db.get_crawled_dates_for_game(app_id, include_snapshots).await {
         Ok(dates) => dates,
         Err(e) => {
             tracing::error!("Failed to get crawled dates for app {app_id}: {e}");
@@ -321,7 +329,11 @@ pub async fn backfill_game_history(
         return;
     }
 
-    let total = dates_to_fetch.len();
+    // total_dates = full span of the date range so that progress (crawled / total)
+    // is never > 100%.  `dates_to_fetch` only contains *uncrawled* dates, but the
+    // progress counter (`get_crawled_dates_count`) counts *all* crawled dates
+    // including those from wishlist_snapshots that survive a re-sync clear.
+    let total = ((yesterday - min_date).num_days() + 1) as usize;
 
     // Record sync start in DB
     if let Err(e) = state
@@ -333,9 +345,10 @@ pub async fn backfill_game_history(
         state.cancel_backfill_token(app_id).await;
         return;
     }
+    let to_fetch = dates_to_fetch.len();
     println!(
         "{}",
-        format!("  app {app_id}: backfilling {total} day(s) from {min_date_str}...").cyan()
+        format!("  app {app_id}: backfilling {to_fetch} day(s) from {min_date_str} ({total} total in range)...").cyan()
     );
 
     let mut backfilled = 0u32;
@@ -348,7 +361,8 @@ pub async fn backfill_game_history(
                 "{}",
                 format!("  app {app_id}: backfill cancelled (game untracked)").yellow()
             );
-            return; // Don't call finish_backfill — game is being removed
+            let _ = state.db.fail_sync(app_id).await;
+            return;
         }
 
         match steam.fetch_wishlist_for_backfill(app_id, date_str).await {
@@ -399,6 +413,7 @@ pub async fn backfill_game_history(
                                 "{}",
                                 format!("  app {app_id}: backfill cancelled during pause").yellow()
                             );
+                            let _ = state.db.fail_sync(app_id).await;
                             return;
                         }
 
@@ -418,7 +433,7 @@ pub async fn backfill_game_history(
                             Err(_) => {
                                 println!("{}", format!("  app {app_id}: still failing after pause, aborting backfill (will resume on next startup)").yellow());
                                 let _ = state.db.fail_sync(app_id).await;
-                                state.finish_backfill(app_id).await;
+                                state.cancel_backfill_token(app_id).await;
                                 return;
                             }
                         }
@@ -431,7 +446,7 @@ pub async fn backfill_game_history(
         if (i + 1) % 50 == 0 {
             println!(
                 "{}",
-                format!("  app {app_id}: backfilled {}/{total} dates...", i + 1).cyan()
+                format!("  app {app_id}: backfilled {}/{to_fetch} dates...", i + 1).cyan()
             );
         }
     }
