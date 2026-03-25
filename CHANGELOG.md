@@ -2,6 +2,36 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.7] - 2026-03-25
+
+### Features
+
+- Allow full resyncs request from user
+- Improvements for full sync status logic, added progress bar on web, etc
+- Various fixed regarding full data sync / manual trigger
+
+### Bug Fixes
+
+- Cargo fmt
+- Fmt & clippy tag v
+- Ci
+- Issue with annomaly message
+- Test
+- Formatting
+
+### Other
+
+- Clippy on cicd + fixes
+- Added ci
+
+### Documentation
+
+- Updated
+
+### Version Bumps
+
+- Version
+
 ## [0.1.6] - 2026-03-24
 
 ### Bug Fixes
