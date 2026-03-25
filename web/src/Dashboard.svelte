@@ -5,6 +5,7 @@
   import { timeAgo, formatDate, isTodayPacific } from "./utils";
   import { POLL_INTERVAL, TICK_INTERVAL, FLASH_DURATION } from "./constants";
   import type { GameReport, SyncStatus } from "./types";
+  import SyncProgressBar from "./SyncProgressBar.svelte";
 
   interface ApiResponse {
     games: GameReport[];
@@ -168,7 +169,7 @@
             {/if}
           </div>
           {#if syncStatuses.get(game.app_id)?.is_syncing}
-            <div class="sync-indicator">Syncing historical data...</div>
+            <SyncProgressBar syncStatus={syncStatuses.get(game.app_id)} />
           {/if}
           <div
             class="stat-net"
@@ -486,12 +487,4 @@
     margin-bottom: 0.4rem;
   }
 
-  .sync-indicator {
-    font-size: 0.75rem;
-    color: var(--accent);
-    padding: 0.3rem 0.5rem;
-    background: rgba(99, 102, 241, 0.08);
-    border-radius: 0.375rem;
-    margin-bottom: 0.5rem;
-  }
 </style>

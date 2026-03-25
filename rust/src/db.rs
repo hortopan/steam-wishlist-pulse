@@ -3,6 +3,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use rusqlite::Connection;
+use rusqlite::OptionalExtension;
 
 use crate::error::{AppError, AppResult};
 use crate::steam::{CountryReport, WishlistReport};
@@ -264,18 +265,26 @@ impl Database {
 
     pub async fn remove_tracked_game(&self, app_id: u32) -> AppResult<bool> {
         let conn = self.pool.get().await;
-        let changed = conn.execute("DELETE FROM tracked_games WHERE app_id = ?1", [app_id])?;
-        if changed > 0 {
-            conn.execute("DELETE FROM wishlist_snapshots WHERE app_id = ?1", [app_id])?;
-            conn.execute("DELETE FROM app_info WHERE app_id = ?1", [app_id])?;
-            conn.execute("DELETE FROM crawled_dates WHERE app_id = ?1", [app_id])?;
-            conn.execute(
-                "DELETE FROM backfill_failed_dates WHERE app_id = ?1",
-                [app_id],
-            )?;
-            conn.execute("DELETE FROM game_sync_status WHERE app_id = ?1", [app_id])?;
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| -> AppResult<bool> {
+            let changed = conn.execute("DELETE FROM tracked_games WHERE app_id = ?1", [app_id])?;
+            if changed > 0 {
+                conn.execute("DELETE FROM wishlist_snapshots WHERE app_id = ?1", [app_id])?;
+                conn.execute("DELETE FROM app_info WHERE app_id = ?1", [app_id])?;
+                conn.execute("DELETE FROM crawled_dates WHERE app_id = ?1", [app_id])?;
+                conn.execute(
+                    "DELETE FROM backfill_failed_dates WHERE app_id = ?1",
+                    [app_id],
+                )?;
+                conn.execute("DELETE FROM game_sync_status WHERE app_id = ?1", [app_id])?;
+            }
+            Ok(changed > 0)
+        })();
+        match &result {
+            Ok(_) => conn.execute_batch("COMMIT")?,
+            Err(_) => { let _ = conn.execute_batch("ROLLBACK"); }
         }
-        Ok(changed > 0)
+        result
     }
 
     pub async fn get_tracked_game_ids(&self) -> AppResult<Vec<u32>> {
@@ -401,47 +410,108 @@ impl Database {
         &self,
         report: &WishlistReport,
     ) -> AppResult<SnapshotChange> {
-        let prev = self.get_latest_snapshot(report.app_id).await?;
-
-        let is_first = prev.is_none();
-
-        if let Some(ref prev) = prev
-            && prev.date == report.date
-            && prev.adds == report.adds
-            && prev.deletes == report.deletes
-            && prev.purchases == report.purchases
-            && prev.gifts == report.gifts
-        {
-            return Ok(SnapshotChange::NoChange);
-        }
-
         let conn = self.pool.get().await;
-        conn.execute(
-            "INSERT INTO wishlist_snapshots (app_id, date, adds, deletes, purchases, gifts, adds_windows, adds_mac, adds_linux)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            rusqlite::params![
-                report.app_id,
-                report.date,
-                report.adds,
-                report.deletes,
-                report.purchases,
-                report.gifts,
-                report.adds_windows,
-                report.adds_mac,
-                report.adds_linux,
-            ],
-        )?;
 
-        let snapshot_id = conn.last_insert_rowid();
-        Self::save_countries(&conn, snapshot_id, &report.countries)?;
+        // Wrap the read-compare-insert in a transaction so no concurrent write
+        // can slip in between the comparison and the insert.
+        conn.execute_batch("BEGIN IMMEDIATE")?;
 
-        if is_first {
-            Ok(SnapshotChange::FirstSnapshot)
-        } else {
-            Ok(SnapshotChange::Changed {
-                previous: prev.unwrap(),
-            })
+        let result = (|| -> AppResult<SnapshotChange> {
+            // Fetch latest snapshot inline (using the same connection/transaction)
+            let prev = {
+                let mut stmt = conn.prepare(
+                    "SELECT id, app_id, date, adds, deletes, purchases, gifts,
+                            adds_windows, adds_mac, adds_linux, fetched_at
+                     FROM wishlist_snapshots
+                     WHERE app_id = ?1
+                     ORDER BY fetched_at DESC
+                     LIMIT 1",
+                )?;
+                let result = stmt
+                    .query_row([report.app_id], |row| {
+                        let snapshot_id: i64 = row.get(0)?;
+                        Ok((
+                            snapshot_id,
+                            WishlistReport {
+                                app_id: row.get(1)?,
+                                date: row.get(2)?,
+                                adds: row.get(3)?,
+                                deletes: row.get(4)?,
+                                purchases: row.get(5)?,
+                                gifts: row.get(6)?,
+                                adds_windows: row.get(7)?,
+                                adds_mac: row.get(8)?,
+                                adds_linux: row.get(9)?,
+                                countries: Vec::new(),
+                                fetched_at: row.get(10)?,
+                                app_min_date: None,
+                            },
+                        ))
+                    })
+                    .ok();
+
+                match result {
+                    Some((snapshot_id, mut r)) => {
+                        r.countries = Self::load_countries(&conn, snapshot_id)?;
+                        Some(r)
+                    }
+                    None => None,
+                }
+            };
+
+            let is_first = prev.is_none();
+
+            if let Some(ref prev) = prev
+                && prev.date == report.date
+                && prev.adds == report.adds
+                && prev.deletes == report.deletes
+                && prev.purchases == report.purchases
+                && prev.gifts == report.gifts
+            {
+                return Ok(SnapshotChange::NoChange);
+            }
+
+            conn.execute(
+                "INSERT INTO wishlist_snapshots (app_id, date, adds, deletes, purchases, gifts, adds_windows, adds_mac, adds_linux)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                rusqlite::params![
+                    report.app_id,
+                    report.date,
+                    report.adds,
+                    report.deletes,
+                    report.purchases,
+                    report.gifts,
+                    report.adds_windows,
+                    report.adds_mac,
+                    report.adds_linux,
+                ],
+            )?;
+
+            let snapshot_id = conn.last_insert_rowid();
+            Self::save_countries(&conn, snapshot_id, &report.countries)?;
+
+            if is_first {
+                Ok(SnapshotChange::FirstSnapshot)
+            } else {
+                Ok(SnapshotChange::Changed {
+                    previous: prev.unwrap(),
+                })
+            }
+        })();
+
+        match &result {
+            Ok(SnapshotChange::NoChange) => {
+                conn.execute_batch("ROLLBACK")?;
+            }
+            Ok(_) => {
+                conn.execute_batch("COMMIT")?;
+            }
+            Err(_) => {
+                let _ = conn.execute_batch("ROLLBACK");
+            }
         }
+
+        result
     }
 
     /// Returns the set of dates (YYYY-MM-DD) that already have snapshot data OR have been
@@ -481,36 +551,89 @@ impl Database {
     ) -> AppResult<()> {
         let conn = self.pool.get().await;
 
-        // Skip if a snapshot already exists for this date (e.g. from the initial fetch on track)
-        let exists: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM wishlist_snapshots WHERE app_id = ?1 AND date = ?2)",
-            rusqlite::params![report.app_id, report.date],
-            |row| row.get(0),
-        )?;
-        if exists {
-            return Ok(());
+        // Wrap exists-check + insert in a transaction to prevent duplicates
+        // from concurrent backfill or polling operations.
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+
+        let result = (|| -> AppResult<()> {
+            // Check if a snapshot already exists for this date.
+            // If a backfill snapshot exists (fetched_at ends with T23:59:59Z),
+            // update it in-place so data stays visible during re-syncs.
+            // If a real-time snapshot exists, skip — don't overwrite live data.
+            let existing: Option<(i64, String)> = conn
+                .prepare(
+                    "SELECT id, fetched_at FROM wishlist_snapshots WHERE app_id = ?1 AND date = ?2",
+                )?
+                .query_row(rusqlite::params![report.app_id, report.date], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })
+                .optional()?;
+
+            match existing {
+                Some((snapshot_id, existing_fetched_at))
+                    if existing_fetched_at.ends_with("T23:59:59Z") =>
+                {
+                    // Update the existing backfill snapshot in-place
+                    conn.execute(
+                        "UPDATE wishlist_snapshots
+                            SET adds = ?1, deletes = ?2, purchases = ?3, gifts = ?4,
+                                adds_windows = ?5, adds_mac = ?6, adds_linux = ?7,
+                                fetched_at = ?8
+                          WHERE id = ?9",
+                        rusqlite::params![
+                            report.adds,
+                            report.deletes,
+                            report.purchases,
+                            report.gifts,
+                            report.adds_windows,
+                            report.adds_mac,
+                            report.adds_linux,
+                            fetched_at,
+                            snapshot_id,
+                        ],
+                    )?;
+                    // Replace country data for this snapshot
+                    conn.execute(
+                        "DELETE FROM snapshot_countries WHERE snapshot_id = ?1",
+                        [snapshot_id],
+                    )?;
+                    Self::save_countries(&conn, snapshot_id, &report.countries)?;
+                }
+                Some(_) => {
+                    // Real-time snapshot exists — don't overwrite
+                    return Ok(());
+                }
+                None => {
+                    // No snapshot for this date — insert new
+                    conn.execute(
+                        "INSERT INTO wishlist_snapshots (app_id, date, adds, deletes, purchases, gifts, adds_windows, adds_mac, adds_linux, fetched_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                        rusqlite::params![
+                            report.app_id,
+                            report.date,
+                            report.adds,
+                            report.deletes,
+                            report.purchases,
+                            report.gifts,
+                            report.adds_windows,
+                            report.adds_mac,
+                            report.adds_linux,
+                            fetched_at,
+                        ],
+                    )?;
+                    let snapshot_id = conn.last_insert_rowid();
+                    Self::save_countries(&conn, snapshot_id, &report.countries)?;
+                }
+            }
+            Ok(())
+        })();
+
+        match &result {
+            Ok(_) => conn.execute_batch("COMMIT")?,
+            Err(_) => { let _ = conn.execute_batch("ROLLBACK"); }
         }
 
-        conn.execute(
-            "INSERT INTO wishlist_snapshots (app_id, date, adds, deletes, purchases, gifts, adds_windows, adds_mac, adds_linux, fetched_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            rusqlite::params![
-                report.app_id,
-                report.date,
-                report.adds,
-                report.deletes,
-                report.purchases,
-                report.gifts,
-                report.adds_windows,
-                report.adds_mac,
-                report.adds_linux,
-                fetched_at,
-            ],
-        )?;
-
-        let snapshot_id = conn.last_insert_rowid();
-        Self::save_countries(&conn, snapshot_id, &report.countries)?;
-        Ok(())
+        result
     }
 
     // ── Backfill failure tracking ──────────────────────────────────
@@ -650,22 +773,26 @@ impl Database {
         Ok(count as u64)
     }
 
-    /// Clear crawled_dates and backfill_failed_dates for a game (used before a full re-sync).
+    /// Clear crawled_dates and backfill_failed_dates for a game (used before a
+    /// full re-sync).  Backfill snapshots are **kept** so the data remains
+    /// visible while the re-sync is in progress; they will be upserted
+    /// in-place by `insert_backfill_snapshot`.
     pub async fn clear_sync_progress(&self, app_id: u32) -> AppResult<()> {
         let conn = self.pool.get().await;
-        conn.execute("DELETE FROM crawled_dates WHERE app_id = ?1", [app_id])?;
-        conn.execute(
-            "DELETE FROM backfill_failed_dates WHERE app_id = ?1",
-            [app_id],
-        )?;
-        Ok(())
-    }
-
-    /// Delete sync status row for a game (cleanup when untracking).
-    pub async fn delete_sync_status(&self, app_id: u32) -> AppResult<()> {
-        let conn = self.pool.get().await;
-        conn.execute("DELETE FROM game_sync_status WHERE app_id = ?1", [app_id])?;
-        Ok(())
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| -> AppResult<()> {
+            conn.execute("DELETE FROM crawled_dates WHERE app_id = ?1", [app_id])?;
+            conn.execute(
+                "DELETE FROM backfill_failed_dates WHERE app_id = ?1",
+                [app_id],
+            )?;
+            Ok(())
+        })();
+        match &result {
+            Ok(_) => conn.execute_batch("COMMIT")?,
+            Err(_) => { let _ = conn.execute_batch("ROLLBACK"); }
+        }
+        result
     }
 
     // ── App min date (cached from Steam API) ────────────────────────
@@ -1351,7 +1478,7 @@ fn parse_flexible_timestamp(s: &str) -> Option<chrono::NaiveDateTime> {
                     let week: u32 = parts[1].parse().ok()?;
                     // Approximate: Jan 1 + week * 7 days
                     let jan1 = NaiveDate::from_ymd_opt(year, 1, 1)?;
-                    let day = jan1 + chrono::Duration::days(week as i64 * 7);
+                    let day = jan1 + chrono::TimeDelta::days(week as i64 * 7);
                     day.and_hms_opt(0, 0, 0)
                 } else {
                     None

@@ -232,8 +232,15 @@ pub async fn backfill_game_history(
     use chrono::NaiveDate;
 
     // 1. Get app_min_date (from DB cache or by fetching current data)
-    let min_date_str = match state.db.get_app_min_date(app_id).await {
-        Ok(Some(d)) => d,
+    //    For full re-syncs, always re-fetch from Steam to discover any newly
+    //    available historical data that wasn't there on the first sync.
+    let cached_min_date = if sync_type == "full" {
+        None
+    } else {
+        state.db.get_app_min_date(app_id).await.ok().flatten()
+    };
+    let min_date_str = match cached_min_date {
+        Some(d) => d,
         _ => {
             // Not cached yet — fetch current data to discover it
             match steam.fetch_wishlist(app_id).await {
@@ -243,7 +250,7 @@ pub async fn backfill_game_history(
                         d.clone()
                     } else {
                         tracing::debug!("No app_min_date for app {app_id}, skipping backfill");
-                        state.finish_backfill(app_id).await;
+                        state.cancel_backfill_token(app_id).await;
                         return;
                     }
                 }
@@ -251,7 +258,7 @@ pub async fn backfill_game_history(
                     tracing::warn!(
                         "Failed to fetch data for app {app_id} to discover min_date: {e}"
                     );
-                    state.finish_backfill(app_id).await;
+                    state.cancel_backfill_token(app_id).await;
                     return;
                 }
             }
@@ -262,18 +269,28 @@ pub async fn backfill_game_history(
         Ok(d) => d,
         Err(e) => {
             tracing::error!("Invalid app_min_date '{min_date_str}' for app {app_id}: {e}");
-            state.finish_backfill(app_id).await;
+            state.cancel_backfill_token(app_id).await;
             return;
         }
     };
 
-    let yesterday = Utc::now().with_timezone(&Pacific).date_naive() - chrono::Duration::days(1);
+    let yesterday = Utc::now().with_timezone(&Pacific).date_naive() - chrono::TimeDelta::days(1);
     if min_date > yesterday {
         tracing::debug!(
             "app {app_id}: min_date {min_date} is not before yesterday, nothing to backfill"
         );
-        state.finish_backfill(app_id).await;
+        state.cancel_backfill_token(app_id).await;
         return;
+    }
+
+    // For full re-syncs, clear progress *after* validating inputs so we don't
+    // lose data if the backfill would have exited early.
+    if sync_type == "full" {
+        if let Err(e) = state.db.clear_sync_progress(app_id).await {
+            tracing::error!("Failed to clear sync progress for app {app_id}: {e}");
+            state.cancel_backfill_token(app_id).await;
+            return;
+        }
     }
 
     // 2. Load already-crawled and failed dates
@@ -281,7 +298,7 @@ pub async fn backfill_game_history(
         Ok(dates) => dates,
         Err(e) => {
             tracing::error!("Failed to get crawled dates for app {app_id}: {e}");
-            state.finish_backfill(app_id).await;
+            state.cancel_backfill_token(app_id).await;
             return;
         }
     };
@@ -295,22 +312,27 @@ pub async fn backfill_game_history(
         if !crawled_dates.contains(&date_str) || failed_dates.contains(&date_str) {
             dates_to_fetch.push(date_str);
         }
-        date -= chrono::Duration::days(1);
+        date -= chrono::TimeDelta::days(1);
     }
 
     if dates_to_fetch.is_empty() {
         tracing::debug!("app {app_id}: full history already backfilled");
-        state.finish_backfill(app_id).await;
+        state.cancel_backfill_token(app_id).await;
         return;
     }
 
     let total = dates_to_fetch.len();
 
     // Record sync start in DB
-    let _ = state
+    if let Err(e) = state
         .db
         .start_sync(app_id, sync_type, requested_by, total as u64)
-        .await;
+        .await
+    {
+        tracing::error!("Failed to record sync start for app {app_id}: {e}");
+        state.cancel_backfill_token(app_id).await;
+        return;
+    }
     println!(
         "{}",
         format!("  app {app_id}: backfilling {total} day(s) from {min_date_str}...").cyan()
@@ -473,7 +495,29 @@ async fn polling_loop(state: AppState, poll_interval_minutes: u64) {
             }
         }
 
-        let results = steam.fetch_all(&app_ids).await;
+        let mut results = steam.fetch_all(&app_ids).await;
+
+        // Single retry for transient failures: collect failed IDs, pause, re-fetch
+        let failed_indices: Vec<usize> = results
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.is_err())
+            .map(|(i, _)| i)
+            .collect();
+
+        if !failed_indices.is_empty() {
+            tracing::info!(
+                "Retrying {} failed fetch(es) after brief pause...",
+                failed_indices.len()
+            );
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            let retry_ids: Vec<u32> = failed_indices.iter().map(|&i| app_ids[i]).collect();
+            let retries = steam.fetch_all(&retry_ids).await;
+            for (retry_result, &orig_idx) in retries.into_iter().zip(&failed_indices) {
+                results[orig_idx] = retry_result;
+            }
+        }
+
         for result in results {
             match result {
                 Ok(report) => {
@@ -522,10 +566,10 @@ async fn polling_loop(state: AppState, poll_interval_minutes: u64) {
                                     true
                                 } else if anomaly_result.insufficient_data {
                                     tracing::info!(
-                                        "Insufficient data for anomaly detection on app {} — sending notification as fallback",
+                                        "Insufficient data for anomaly detection on app {} — skipping notification (need more history)",
                                         report.app_id,
                                     );
-                                    true
+                                    false
                                 } else {
                                     tracing::info!(
                                         "No anomaly for app {} — skipping notification (anomalies_only mode)",

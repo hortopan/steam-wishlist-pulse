@@ -211,7 +211,13 @@ impl AppState {
         }
     }
 
-    /// Remove a backfill token when backfill completes naturally.
+    /// Remove the backfill token without updating sync status.
+    /// Use this for early exits before `start_sync` has been called.
+    pub async fn cancel_backfill_token(&self, app_id: u32) {
+        self.backfill_tokens.lock().await.remove(&app_id);
+    }
+
+    /// Remove a backfill token and mark the sync as completed in the DB.
     pub async fn finish_backfill(&self, app_id: u32) {
         self.backfill_tokens.lock().await.remove(&app_id);
         let _ = self.db.complete_sync(app_id).await;
@@ -451,11 +457,6 @@ impl AppState {
         self.steam.read().await.clone()
     }
 
-    /// Check if a backfill is currently in progress for a game (in-memory check).
-    pub async fn is_backfilling(&self, app_id: u32) -> bool {
-        self.backfill_tokens.lock().await.contains_key(&app_id)
-    }
-
     /// Build a SyncStatusResponse for a single game by combining DB state with live progress.
     async fn build_sync_status(&self, sync_row: &crate::db::GameSyncRow) -> SyncStatusResponse {
         let is_syncing = sync_row.status == "in_progress";
@@ -468,27 +469,9 @@ impl AppState {
             sync_row.total_dates
         };
 
-        let cooldown_active = if sync_row.status == "completed" && sync_row.sync_type == "full" {
-            if let Some(ref completed_at) = sync_row.completed_at {
-                if let Ok(completed) = chrono::DateTime::parse_from_rfc3339(completed_at) {
-                    let elapsed = chrono::Utc::now() - completed.with_timezone(&chrono::Utc);
-                    elapsed < chrono::Duration::minutes(30)
-                } else {
-                    // Try the SQLite format (no timezone offset, always UTC)
-                    chrono::NaiveDateTime::parse_from_str(completed_at, "%Y-%m-%dT%H:%M:%SZ")
-                        .map(|naive| {
-                            let completed = naive.and_utc();
-                            let elapsed = chrono::Utc::now() - completed;
-                            elapsed < chrono::Duration::minutes(30)
-                        })
-                        .unwrap_or(false)
-                }
-            } else {
-                false
-            }
-        } else {
-            false
-        };
+        let cooldown_active = sync_row.status == "completed"
+            && sync_row.sync_type == "full"
+            && is_within_cooldown(sync_row.completed_at.as_deref());
 
         let last_completed_at = if sync_row.status == "completed" {
             sync_row.completed_at.clone()
@@ -675,6 +658,35 @@ impl AppState {
             crate::discord::run_bot(token, steam, db, admin_ids).await;
         });
         *handle = Some(h);
+    }
+}
+
+// ── Helpers ─────────────────────────────────────────────────────────
+
+/// Parse a UTC timestamp string and return whether it falls within the last 30 minutes.
+/// Accepts RFC 3339 (which includes the `%Y-%m-%dT%H:%M:%SZ` format produced by SQLite).
+fn is_within_cooldown(completed_at: Option<&str>) -> bool {
+    let Some(completed_at) = completed_at else {
+        return false;
+    };
+    chrono::DateTime::parse_from_rfc3339(completed_at)
+        .map(|completed| {
+            let elapsed = chrono::Utc::now() - completed.with_timezone(&chrono::Utc);
+            elapsed < chrono::TimeDelta::minutes(30)
+        })
+        .unwrap_or(false)
+}
+
+/// Normalize a date string to a full ISO 8601 timestamp for JS compatibility.
+/// Passes through values that already contain a `T` separator (i.e. full timestamps),
+/// and appends `T00:00:00Z` to bare `YYYY-MM-DD` dates.
+fn normalize_date_to_iso(date: &str) -> String {
+    if date.is_empty() {
+        String::new()
+    } else if date.contains('T') {
+        date.to_owned()
+    } else {
+        format!("{date}T00:00:00Z")
     }
 }
 
@@ -1206,14 +1218,7 @@ async fn api_wishlist(State(state): State<AppState>, jar: CookieJar) -> Response
                 Some((n, img)) => (n.clone(), img.clone()),
                 None => (format!("App {}", report.app_id), String::new()),
             };
-            // Ensure date is a full ISO 8601 timestamp for JS compatibility
-            let date = if report.date.is_empty() {
-                String::new()
-            } else if report.date.contains('T') {
-                report.date
-            } else {
-                format!("{}T00:00:00Z", report.date)
-            };
+            let date = normalize_date_to_iso(&report.date);
             let game_totals = totals.get(&report.app_id);
             GameReport {
                 app_id: report.app_id,
@@ -1270,13 +1275,7 @@ async fn api_game_detail(
         .ok()
         .flatten()
         .map(|report| {
-            let date = if report.date.is_empty() {
-                String::new()
-            } else if report.date.contains('T') {
-                report.date
-            } else {
-                format!("{}T00:00:00Z", report.date)
-            };
+            let date = normalize_date_to_iso(&report.date);
             GameReport {
                 app_id: report.app_id,
                 name: name.clone(),
@@ -1336,44 +1335,44 @@ async fn api_game_chart(
     let now = chrono::Utc::now();
     let (since, resolution) = match range {
         "1d" => {
-            let since = now - chrono::Duration::days(1);
+            let since = now - chrono::TimeDelta::days(1);
             (since, "raw")
         }
         "2d" => {
-            let since = now - chrono::Duration::days(2);
+            let since = now - chrono::TimeDelta::days(2);
             (since, "raw")
         }
         "3d" => {
-            let since = now - chrono::Duration::days(3);
+            let since = now - chrono::TimeDelta::days(3);
             (since, "raw")
         }
         "7d" => {
-            let since = now - chrono::Duration::days(7);
+            let since = now - chrono::TimeDelta::days(7);
             (since, "daily")
         }
         "1m" => {
-            let since = now - chrono::Duration::days(30);
+            let since = now - chrono::TimeDelta::days(30);
             (since, "daily")
         }
         "3m" => {
-            let since = now - chrono::Duration::days(90);
+            let since = now - chrono::TimeDelta::days(90);
             (since, "daily")
         }
         "1y" => {
-            let since = now - chrono::Duration::days(365);
+            let since = now - chrono::TimeDelta::days(365);
             (since, "weekly")
         }
         "5y" => {
-            let since = now - chrono::Duration::days(5 * 365);
+            let since = now - chrono::TimeDelta::days(5 * 365);
             (since, "monthly")
         }
         "all" => {
             // Far enough back to cover any realistic dataset
-            let since = now - chrono::Duration::days(20 * 365);
+            let since = now - chrono::TimeDelta::days(20 * 365);
             (since, "monthly")
         }
         _ => {
-            let since = now - chrono::Duration::days(7);
+            let since = now - chrono::TimeDelta::days(7);
             (since, "daily")
         }
     };
@@ -1393,7 +1392,7 @@ async fn api_game_chart(
         if resolution == "raw" {
             // For raw resolution, compute anomalies on individual raw snapshots (original behavior)
             let lookback_secs = anomaly_config.lookback_days as i64 * 86400;
-            let lookback_since = (since - chrono::Duration::seconds(lookback_secs))
+            let lookback_since = (since - chrono::TimeDelta::seconds(lookback_secs))
                 .format("%Y-%m-%dT%H:%M:%SZ")
                 .to_string();
 
@@ -1445,7 +1444,7 @@ async fn api_game_chart(
                 _ => 86400, // daily
             };
             let lookback_secs = anomaly_config.lookback_days as i64 * secs_per_period;
-            let lookback_since = (since - chrono::Duration::seconds(lookback_secs))
+            let lookback_since = (since - chrono::TimeDelta::seconds(lookback_secs))
                 .format("%Y-%m-%dT%H:%M:%SZ")
                 .to_string();
 
@@ -1559,7 +1558,7 @@ async fn api_game_history(
     let context_snapshots = match (&oldest_in_page, &newest_in_page) {
         (Some(oldest_ts), Some(newest_ts)) => {
             if let Some(oldest_dt) = parse_ts(oldest_ts) {
-                let lookback_start = oldest_dt - chrono::Duration::seconds(lookback_secs);
+                let lookback_start = oldest_dt - chrono::TimeDelta::seconds(lookback_secs);
                 let since_str = lookback_start.format("%Y-%m-%dT%H:%M:%SZ").to_string();
                 state
                     .db
@@ -2663,9 +2662,12 @@ async fn api_admin_sync(
             .into_response();
     }
 
-    // 2. Check if already syncing (DB check for crash-resilient state)
-    if let Ok(Some(row)) = state.db.get_sync_status(app_id).await {
-        if row.status == "in_progress" {
+    // 2. Check if already syncing and atomically acquire the backfill slot.
+    //    Hold the lock across both the check and token insertion to prevent
+    //    two concurrent requests from both passing the check.
+    let token = {
+        let mut tokens = state.backfill_tokens.lock().await;
+        if tokens.contains_key(&app_id) {
             return (
                 StatusCode::CONFLICT,
                 Json(serde_json::json!({
@@ -2676,21 +2678,17 @@ async fn api_admin_sync(
                 .into_response();
         }
 
-        // 3. Cooldown check — reject if a full sync completed < 30 min ago
-        if row.status == "completed"
-            && row.sync_type == "full"
-            && let Some(ref completed_at) = row.completed_at
-        {
-            let within_cooldown =
-                chrono::NaiveDateTime::parse_from_str(completed_at, "%Y-%m-%dT%H:%M:%SZ")
-                    .map(|naive| {
-                        let completed = naive.and_utc();
-                        let elapsed = chrono::Utc::now() - completed;
-                        elapsed < chrono::Duration::minutes(30)
-                    })
-                    .unwrap_or(false);
+        if let Ok(Some(row)) = state.db.get_sync_status(app_id).await {
+            if row.status == "in_progress" {
+                // Stale DB row from a crash — clean it up
+                let _ = state.db.fail_sync(app_id).await;
+            }
 
-            if within_cooldown {
+            // 3. Cooldown check — reject if a full sync completed < 30 min ago
+            if row.status == "completed"
+                && row.sync_type == "full"
+                && is_within_cooldown(row.completed_at.as_deref())
+            {
                 return (
                     StatusCode::TOO_MANY_REQUESTS,
                     Json(serde_json::json!({
@@ -2701,31 +2699,32 @@ async fn api_admin_sync(
                     .into_response();
             }
         }
-    }
+
+        // Reserve the slot while still holding the lock
+        let token = tokio_util::sync::CancellationToken::new();
+        tokens.insert(app_id, token.clone());
+        token
+    };
 
     // 4. Need Steam client
     let steam = match state.get_steam().await {
         Some(s) => s,
         None => {
-            return Json(serde_json::json!({
-                "success": false,
-                "error": "Steam API key not configured"
-            }))
-            .into_response();
+            // Release the token we just acquired since we can't proceed
+            state.backfill_tokens.lock().await.remove(&app_id);
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": "Steam API key not configured"
+                })),
+            )
+                .into_response();
         }
     };
 
-    // 5. Clear crawled_dates + failed_dates for full re-sync
-    if let Err(e) = state.db.clear_sync_progress(app_id).await {
-        return Json(serde_json::json!({
-            "success": false,
-            "error": format!("Failed to clear sync progress: {e}")
-        }))
-        .into_response();
-    }
-
-    // 6. Start backfill
-    let token = state.start_backfill(app_id).await;
+    // 5. Start backfill — clear_sync_progress is handled inside backfill_game_history
+    //    for "full" syncs, so we don't risk data loss on early exit.
     let bg_state = state.clone();
     let bg_steam = steam.clone();
     tokio::spawn(async move {
@@ -2971,6 +2970,28 @@ async fn csrf_middleware(req: axum::extract::Request, next: axum::middleware::Ne
     next.run(req).await
 }
 
+// ── API response headers middleware ─────────────────────────────────
+
+/// Adds security and caching headers to all `/api/` responses:
+/// - `Cache-Control: no-store` — prevents browsers from caching API data
+/// - `X-Content-Type-Options: nosniff` — prevents MIME-type sniffing
+async fn api_headers_middleware(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let is_api = req.uri().path().starts_with("/api/");
+    let mut resp = next.run(req).await;
+    if is_api {
+        let headers = resp.headers_mut();
+        headers.insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+        headers.insert(
+            header::X_CONTENT_TYPE_OPTIONS,
+            "nosniff".parse().unwrap(),
+        );
+    }
+    resp
+}
+
 // ── Router and server ───────────────────────────────────────────────
 
 pub async fn run_web(bind_addr: String, state: AppState) {
@@ -3008,6 +3029,7 @@ pub async fn run_web(bind_addr: String, state: AppState) {
         // Debug routes — uncomment for local testing only
         // .route("/debug/test/{app_id}", get(debug_test_change))
         .layer(middleware::from_fn(csrf_middleware))
+        .layer(middleware::from_fn(api_headers_middleware))
         .with_state(state)
         .fallback(static_handler);
 

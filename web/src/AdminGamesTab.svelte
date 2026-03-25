@@ -2,6 +2,7 @@
   import { onMount, onDestroy } from 'svelte';
   import type { TrackedGame } from './types';
   import { api, apiPost, AuthError } from './api';
+  import { minutesAgo } from './utils';
 
   let {
     onLogout,
@@ -20,6 +21,10 @@
   let trackingLoading = $state(false);
   let trackingAction = $state(false);
   let pollTimer: ReturnType<typeof setInterval> | null = null;
+
+  // Sync confirmation modal state
+  let confirmSync = $state<{ appId: number; name: string } | null>(null);
+  let syncRequesting = $state(false);
 
   async function loadTrackedGames() {
     trackingLoading = true;
@@ -102,29 +107,42 @@
     }
   }
 
-  async function syncGame(appId: number) {
-    trackingAction = true;
+  function requestSync(appId: number, name: string) {
+    confirmSync = { appId, name };
+  }
+
+  function cancelSync() {
+    if (syncRequesting) return;
+    confirmSync = null;
+  }
+
+  async function confirmAndSync() {
+    if (!confirmSync) return;
+    const { appId } = confirmSync;
+    syncRequesting = true;
     try {
       const data = await apiPost<{ success: boolean; message?: string; error?: string }>('/admin/sync', { app_id: appId });
+      confirmSync = null;
       if (data.success) {
         showToast('success', data.message!);
+        // Optimistically mark the game as syncing so the UI updates immediately
+        trackedGames = trackedGames.map(g =>
+          g.app_id === appId ? { ...g, is_syncing: true, sync_progress_crawled: 0, sync_progress_total: 0 } : g
+        );
         await loadTrackedGames();
       } else {
         showToast('error', data.error || 'Failed to start sync');
       }
     } catch (e: any) {
+      confirmSync = null;
       if (e instanceof AuthError) { onLogout(); return; }
       showToast('error', e.message);
     } finally {
-      trackingAction = false;
+      syncRequesting = false;
     }
   }
 
-  function minutesAgo(isoDate: string | null): number {
-    if (!isoDate) return 0;
-    const diff = Date.now() - new Date(isoDate + 'Z').getTime();
-    return Math.max(0, Math.round(diff / 60000));
-  }
+  // minutesAgo imported from utils
 
   function syncProgressPct(game: TrackedGame): number {
     if (game.sync_progress_total === 0) return 0;
@@ -204,14 +222,16 @@
           <div class="game-actions">
             <button
               class="sync-btn"
-              onclick={() => syncGame(game.app_id)}
+              onclick={() => requestSync(game.app_id, game.name)}
               disabled={trackingAction || game.is_syncing || game.cooldown_active}
-              title={game.is_syncing ? 'Sync in progress' : game.cooldown_active ? 'Recently synced — please wait' : 'Re-sync all historical data'}
+              title={game.is_syncing ? 'Sync in progress' : game.cooldown_active ? 'Recently synced — please wait before requesting another full sync' : 'Re-sync all historical wishlist data'}
             >
               {#if game.is_syncing}
                 Syncing...
               {:else if game.cooldown_active}
-                Synced {minutesAgo(game.last_sync_completed_at)}m ago
+                Last full sync {minutesAgo(game.last_sync_completed_at)}m ago
+              {:else if game.last_sync_completed_at}
+                Re-sync (last {minutesAgo(game.last_sync_completed_at)}m ago)
               {:else}
                 Full Sync
               {/if}
@@ -229,6 +249,24 @@
     </div>
   {/if}
 </section>
+
+{#if confirmSync}
+  <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
+  <div class="modal-overlay" onkeydown={(e) => e.key === 'Escape' && cancelSync()} onclick={cancelSync}>
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="modal-box" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
+      <h3>Confirm Full Sync</h3>
+      <p>This will re-sync all historical wishlist data for <strong>{confirmSync.name}</strong>. This may take a while.</p>
+      <p class="modal-hint">A full sync is only needed if you notice missing data. Daily updates happen automatically.</p>
+      <div class="modal-actions">
+        <button class="modal-cancel" onclick={cancelSync} disabled={syncRequesting}>Cancel</button>
+        <button class="modal-confirm" onclick={confirmAndSync} disabled={syncRequesting}>
+          {syncRequesting ? 'Requesting...' : 'Yes, Sync'}
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
 
 <style>
   .config-section {
@@ -473,6 +511,92 @@
   }
 
   .untrack-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.55);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    animation: fadeIn 0.15s ease;
+  }
+
+  @keyframes fadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+
+  .modal-box {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 0.75rem;
+    padding: 1.5rem;
+    max-width: 380px;
+    width: 90%;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+  }
+
+  .modal-box h3 {
+    font-size: 1.05rem;
+    font-weight: 600;
+    margin-bottom: 0.5rem;
+  }
+
+  .modal-box p {
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    line-height: 1.4;
+  }
+
+  .modal-hint {
+    margin-top: 0.5rem;
+  }
+
+  .modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.5rem;
+    margin-top: 1.25rem;
+  }
+
+  .modal-cancel {
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    padding: 0.45rem 1rem;
+    border-radius: 0.375rem;
+    font-size: 0.85rem;
+    cursor: pointer;
+    transition: border-color 0.2s, color 0.2s;
+  }
+
+  .modal-cancel:hover {
+    border-color: var(--text-muted);
+    color: var(--text);
+  }
+
+  .modal-confirm {
+    background: var(--accent);
+    border: none;
+    color: white;
+    padding: 0.45rem 1rem;
+    border-radius: 0.375rem;
+    font-size: 0.85rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: opacity 0.2s;
+  }
+
+  .modal-confirm:hover:not(:disabled) {
+    opacity: 0.9;
+  }
+
+  .modal-confirm:disabled {
     opacity: 0.5;
     cursor: not-allowed;
   }

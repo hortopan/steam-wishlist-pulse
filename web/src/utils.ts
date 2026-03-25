@@ -19,18 +19,27 @@ export function formatDate(iso: string): string {
   return isNaN(d.getTime()) ? '' : dtf.format(d);
 }
 
+const pacificDateFmt = new Intl.DateTimeFormat('en-CA', {
+  timeZone: 'America/Los_Angeles',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+});
+
 /** Check whether an ISO date string falls on "today" in US/Pacific (Steam's reporting TZ). */
 export function isTodayPacific(iso: string): boolean {
   if (!iso) return false;
-  const pacific = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'America/Los_Angeles',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  });
   const snapshotDate = iso.slice(0, 10); // "YYYY-MM-DD"
-  const todayDate = pacific.format(new Date()); // "YYYY-MM-DD" (en-CA uses this format)
+  const todayDate = pacificDateFmt.format(new Date()); // "YYYY-MM-DD" (en-CA uses this format)
   return snapshotDate === todayDate;
+}
+
+/** Return how many whole minutes have elapsed since an ISO 8601 timestamp. */
+export function minutesAgo(iso: string | null, now: number = Date.now()): number {
+  if (!iso) return 0;
+  const ms = new Date(iso).getTime();
+  if (isNaN(ms)) return 0;
+  return Math.max(0, Math.round((now - ms) / 60_000));
 }
 
 export function formatNumber(n: number): string {
