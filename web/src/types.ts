@@ -94,4 +94,23 @@ export interface TrackedGame {
   name: string;
   image_url: string;
   tracked_since: string;
+  is_syncing: boolean;
+  sync_type: string | null;
+  sync_progress_crawled: number;
+  sync_progress_total: number;
+  last_sync_completed_at: string | null;
+  cooldown_active: boolean;
+}
+
+export interface SyncStatus {
+  app_id: number;
+  is_syncing: boolean;
+  sync_type: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  progress_crawled: number;
+  progress_total: number;
+  last_completed_at: string | null;
+  cooldown_active: boolean;
+  requested_by: string | null;
 }

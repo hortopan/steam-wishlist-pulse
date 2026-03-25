@@ -17,6 +17,17 @@ pub enum SnapshotChange {
     Changed { previous: WishlistReport },
 }
 
+/// Row from the `game_sync_status` table.
+pub struct GameSyncRow {
+    pub app_id: u32,
+    pub sync_type: String,
+    pub status: String,
+    pub started_at: String,
+    pub completed_at: Option<String>,
+    pub total_dates: u64,
+    pub requested_by: Option<String>,
+}
+
 /// A lightweight SQLite connection pool backed by a Tokio MPSC channel.
 ///
 /// Instead of a single `Arc<Mutex<Connection>>`, this maintains multiple
@@ -188,6 +199,19 @@ impl Database {
         // Add min_date column to app_info (safe to run repeatedly)
         let _ = conn.execute_batch("ALTER TABLE app_info ADD COLUMN min_date TEXT");
 
+        // Sync status tracking table
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS game_sync_status (
+                app_id        INTEGER PRIMARY KEY,
+                sync_type     TEXT NOT NULL DEFAULT 'initial',
+                status        TEXT NOT NULL DEFAULT 'in_progress',
+                started_at    TEXT NOT NULL,
+                completed_at  TEXT,
+                total_dates   INTEGER NOT NULL DEFAULT 0,
+                requested_by  TEXT
+            );",
+        )?;
+
         Ok(())
     }
 
@@ -249,6 +273,7 @@ impl Database {
                 "DELETE FROM backfill_failed_dates WHERE app_id = ?1",
                 [app_id],
             )?;
+            conn.execute("DELETE FROM game_sync_status WHERE app_id = ?1", [app_id])?;
         }
         Ok(changed > 0)
     }
@@ -522,6 +547,125 @@ impl Database {
             .query_map([app_id], |row| row.get::<_, String>(0))?
             .collect::<Result<std::collections::HashSet<String>, _>>()?;
         Ok(dates)
+    }
+
+    // ── Sync status tracking ────────────────────────────────────────
+
+    /// Record the start of a sync for a game. Replaces any previous sync row.
+    pub async fn start_sync(
+        &self,
+        app_id: u32,
+        sync_type: &str,
+        requested_by: &str,
+        total_dates: u64,
+    ) -> AppResult<()> {
+        let conn = self.pool.get().await;
+        conn.execute(
+            "INSERT OR REPLACE INTO game_sync_status (app_id, sync_type, status, started_at, completed_at, total_dates, requested_by)
+             VALUES (?1, ?2, 'in_progress', strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), NULL, ?3, ?4)",
+            rusqlite::params![app_id, sync_type, total_dates as i64, requested_by],
+        )?;
+        Ok(())
+    }
+
+    /// Mark a sync as completed.
+    pub async fn complete_sync(&self, app_id: u32) -> AppResult<()> {
+        let conn = self.pool.get().await;
+        conn.execute(
+            "UPDATE game_sync_status SET status = 'completed', completed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE app_id = ?1",
+            [app_id],
+        )?;
+        Ok(())
+    }
+
+    /// Mark a sync as failed.
+    pub async fn fail_sync(&self, app_id: u32) -> AppResult<()> {
+        let conn = self.pool.get().await;
+        conn.execute(
+            "UPDATE game_sync_status SET status = 'failed', completed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE app_id = ?1",
+            [app_id],
+        )?;
+        Ok(())
+    }
+
+    /// Get sync status for a specific game.
+    pub async fn get_sync_status(&self, app_id: u32) -> AppResult<Option<GameSyncRow>> {
+        let conn = self.pool.get().await;
+        let mut stmt = conn.prepare(
+            "SELECT app_id, sync_type, status, started_at, completed_at, total_dates, requested_by
+             FROM game_sync_status WHERE app_id = ?1",
+        )?;
+        match stmt.query_row([app_id], |row| {
+            Ok(GameSyncRow {
+                app_id: row.get(0)?,
+                sync_type: row.get(1)?,
+                status: row.get(2)?,
+                started_at: row.get(3)?,
+                completed_at: row.get(4)?,
+                total_dates: row.get::<_, i64>(5)? as u64,
+                requested_by: row.get(6)?,
+            })
+        }) {
+            Ok(row) => Ok(Some(row)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Get sync statuses for all games.
+    pub async fn get_all_sync_statuses(&self) -> AppResult<Vec<GameSyncRow>> {
+        let conn = self.pool.get().await;
+        let mut stmt = conn.prepare(
+            "SELECT app_id, sync_type, status, started_at, completed_at, total_dates, requested_by
+             FROM game_sync_status",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(GameSyncRow {
+                    app_id: row.get(0)?,
+                    sync_type: row.get(1)?,
+                    status: row.get(2)?,
+                    started_at: row.get(3)?,
+                    completed_at: row.get(4)?,
+                    total_dates: row.get::<_, i64>(5)? as u64,
+                    requested_by: row.get(6)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Count how many dates have been crawled for a game (efficient count query).
+    pub async fn get_crawled_dates_count(&self, app_id: u32) -> AppResult<u64> {
+        let conn = self.pool.get().await;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM (
+                SELECT date FROM wishlist_snapshots WHERE app_id = ?1
+                UNION
+                SELECT date FROM crawled_dates WHERE app_id = ?1
+            )",
+            [app_id],
+            |row| row.get(0),
+        )?;
+        Ok(count as u64)
+    }
+
+    /// Clear crawled_dates and backfill_failed_dates for a game (used before a full re-sync).
+    pub async fn clear_sync_progress(&self, app_id: u32) -> AppResult<()> {
+        let conn = self.pool.get().await;
+        conn.execute("DELETE FROM crawled_dates WHERE app_id = ?1", [app_id])?;
+        conn.execute(
+            "DELETE FROM backfill_failed_dates WHERE app_id = ?1",
+            [app_id],
+        )?;
+        Ok(())
+    }
+
+    /// Delete sync status row for a game (cleanup when untracking).
+    pub async fn delete_sync_status(&self, app_id: u32) -> AppResult<()> {
+        let conn = self.pool.get().await;
+        conn.execute("DELETE FROM game_sync_status WHERE app_id = ?1", [app_id])?;
+        Ok(())
     }
 
     // ── App min date (cached from Steam API) ────────────────────────

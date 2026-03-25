@@ -214,7 +214,7 @@ async fn backfill_all_games(state: &AppState) {
 
     for app_id in app_ids {
         let token = state.start_backfill(app_id).await;
-        backfill_game_history(state, &steam, app_id, token).await;
+        backfill_game_history(state, &steam, app_id, token, "auto", "system").await;
     }
 
     println!("{}", "History backfill complete.".cyan());
@@ -226,6 +226,8 @@ pub async fn backfill_game_history(
     steam: &SteamClient,
     app_id: u32,
     token: tokio_util::sync::CancellationToken,
+    sync_type: &str,
+    requested_by: &str,
 ) {
     use chrono::NaiveDate;
 
@@ -303,6 +305,12 @@ pub async fn backfill_game_history(
     }
 
     let total = dates_to_fetch.len();
+
+    // Record sync start in DB
+    let _ = state
+        .db
+        .start_sync(app_id, sync_type, requested_by, total as u64)
+        .await;
     println!(
         "{}",
         format!("  app {app_id}: backfilling {total} day(s) from {min_date_str}...").cyan()
@@ -387,6 +395,7 @@ pub async fn backfill_game_history(
                             }
                             Err(_) => {
                                 println!("{}", format!("  app {app_id}: still failing after pause, aborting backfill (will resume on next startup)").yellow());
+                                let _ = state.db.fail_sync(app_id).await;
                                 state.finish_backfill(app_id).await;
                                 return;
                             }

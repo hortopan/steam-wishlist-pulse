@@ -4,7 +4,7 @@
   import { api, AuthError } from "./api";
   import { timeAgo, formatDate, isTodayPacific } from "./utils";
   import { POLL_INTERVAL, TICK_INTERVAL, FLASH_DURATION } from "./constants";
-  import type { GameReport } from "./types";
+  import type { GameReport, SyncStatus } from "./types";
 
   interface ApiResponse {
     games: GameReport[];
@@ -24,6 +24,7 @@
   } = $props();
 
   let games = $state<GameReport[]>([]);
+  let syncStatuses = $state<Map<number, SyncStatus>>(new Map());
   let loading = $state(true);
   let error = $state<string | null>(null);
   let now = $state(Date.now());
@@ -72,6 +73,14 @@
 
       prevGamesMap = new Map(data.games.map((g) => [g.app_id, { ...g }]));
       games = data.games;
+
+      // Fetch sync statuses
+      try {
+        const statuses = await api<SyncStatus[]>("/sync/status");
+        syncStatuses = new Map(statuses.map((s) => [s.app_id, s]));
+      } catch {
+        // Non-critical — ignore
+      }
     } catch (e: any) {
       if (e instanceof AuthError) { onLogout(); return; }
       error = e.message;
@@ -158,6 +167,9 @@
               <span class="no-data">No data yet</span>
             {/if}
           </div>
+          {#if syncStatuses.get(game.app_id)?.is_syncing}
+            <div class="sync-indicator">Syncing historical data...</div>
+          {/if}
           <div
             class="stat-net"
             class:positive={game.total_adds - game.total_deletes > 0}
@@ -472,5 +484,14 @@
     text-transform: uppercase;
     letter-spacing: 0.05em;
     margin-bottom: 0.4rem;
+  }
+
+  .sync-indicator {
+    font-size: 0.75rem;
+    color: var(--accent);
+    padding: 0.3rem 0.5rem;
+    background: rgba(99, 102, 241, 0.08);
+    border-radius: 0.375rem;
+    margin-bottom: 0.5rem;
   }
 </style>

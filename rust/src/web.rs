@@ -214,6 +214,7 @@ impl AppState {
     /// Remove a backfill token when backfill completes naturally.
     pub async fn finish_backfill(&self, app_id: u32) {
         self.backfill_tokens.lock().await.remove(&app_id);
+        let _ = self.db.complete_sync(app_id).await;
     }
 
     pub async fn get_notification_mode(&self) -> String {
@@ -448,6 +449,65 @@ impl AppState {
 
     pub async fn get_steam(&self) -> Option<SteamClient> {
         self.steam.read().await.clone()
+    }
+
+    /// Check if a backfill is currently in progress for a game (in-memory check).
+    pub async fn is_backfilling(&self, app_id: u32) -> bool {
+        self.backfill_tokens.lock().await.contains_key(&app_id)
+    }
+
+    /// Build a SyncStatusResponse for a single game by combining DB state with live progress.
+    async fn build_sync_status(&self, sync_row: &crate::db::GameSyncRow) -> SyncStatusResponse {
+        let is_syncing = sync_row.status == "in_progress";
+        let progress_crawled = if is_syncing {
+            self.db
+                .get_crawled_dates_count(sync_row.app_id)
+                .await
+                .unwrap_or(0)
+        } else {
+            sync_row.total_dates
+        };
+
+        let cooldown_active = if sync_row.status == "completed" && sync_row.sync_type == "full" {
+            if let Some(ref completed_at) = sync_row.completed_at {
+                if let Ok(completed) = chrono::DateTime::parse_from_rfc3339(completed_at) {
+                    let elapsed = chrono::Utc::now() - completed.with_timezone(&chrono::Utc);
+                    elapsed < chrono::Duration::minutes(30)
+                } else {
+                    // Try the SQLite format (no timezone offset, always UTC)
+                    chrono::NaiveDateTime::parse_from_str(completed_at, "%Y-%m-%dT%H:%M:%SZ")
+                        .map(|naive| {
+                            let completed = naive.and_utc();
+                            let elapsed = chrono::Utc::now() - completed;
+                            elapsed < chrono::Duration::minutes(30)
+                        })
+                        .unwrap_or(false)
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        let last_completed_at = if sync_row.status == "completed" {
+            sync_row.completed_at.clone()
+        } else {
+            None
+        };
+
+        SyncStatusResponse {
+            app_id: sync_row.app_id,
+            is_syncing,
+            sync_type: Some(sync_row.sync_type.clone()),
+            started_at: Some(sync_row.started_at.clone()),
+            completed_at: sync_row.completed_at.clone(),
+            progress_crawled,
+            progress_total: sync_row.total_dates,
+            last_completed_at,
+            cooldown_active,
+            requested_by: sync_row.requested_by.clone(),
+        }
     }
 
     /// Ensure a SteamClient exists with the given key. Creates one or updates existing.
@@ -818,6 +878,31 @@ struct TrackedGameEntry {
     name: String,
     image_url: String,
     tracked_since: String,
+    is_syncing: bool,
+    sync_type: Option<String>,
+    sync_progress_crawled: u64,
+    sync_progress_total: u64,
+    last_sync_completed_at: Option<String>,
+    cooldown_active: bool,
+}
+
+#[derive(Serialize, Clone)]
+struct SyncStatusResponse {
+    app_id: u32,
+    is_syncing: bool,
+    sync_type: Option<String>,
+    started_at: Option<String>,
+    completed_at: Option<String>,
+    progress_crawled: u64,
+    progress_total: u64,
+    last_completed_at: Option<String>,
+    cooldown_active: bool,
+    requested_by: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SyncRequest {
+    app_id: u32,
 }
 
 #[derive(Serialize, Clone)]
@@ -2347,24 +2432,53 @@ async fn api_admin_tracked_games(State(state): State<AppState>, jar: CookieJar) 
         None => Default::default(),
     };
 
-    let games: Vec<TrackedGameEntry> = ids
-        .iter()
-        .map(|&id| {
-            let (name, image_url) = if let Some((n, img)) = db_info.get(&id) {
-                (n.clone(), img.clone())
-            } else if let Some(app) = mem_info.get(&id) {
-                (app.name.clone(), app.image_url.clone().unwrap_or_default())
-            } else {
-                (format!("App {id}"), String::new())
-            };
-            TrackedGameEntry {
-                app_id: id,
-                name,
-                image_url,
-                tracked_since: since_map.get(&id).cloned().unwrap_or_default(),
-            }
-        })
-        .collect();
+    // Load sync statuses for all games
+    let sync_rows = state.db.get_all_sync_statuses().await.unwrap_or_default();
+
+    let mut games: Vec<TrackedGameEntry> = Vec::with_capacity(ids.len());
+    for &id in &ids {
+        let (name, image_url) = if let Some((n, img)) = db_info.get(&id) {
+            (n.clone(), img.clone())
+        } else if let Some(app) = mem_info.get(&id) {
+            (app.name.clone(), app.image_url.clone().unwrap_or_default())
+        } else {
+            (format!("App {id}"), String::new())
+        };
+
+        let (
+            is_syncing,
+            sync_type,
+            sync_progress_crawled,
+            sync_progress_total,
+            last_sync_completed_at,
+            cooldown_active,
+        ) = if let Some(row) = sync_rows.iter().find(|r| r.app_id == id) {
+            let status = state.build_sync_status(row).await;
+            (
+                status.is_syncing,
+                status.sync_type,
+                status.progress_crawled,
+                status.progress_total,
+                status.last_completed_at,
+                status.cooldown_active,
+            )
+        } else {
+            (false, None, 0, 0, None, false)
+        };
+
+        games.push(TrackedGameEntry {
+            app_id: id,
+            name,
+            image_url,
+            tracked_since: since_map.get(&id).cloned().unwrap_or_default(),
+            is_syncing,
+            sync_type,
+            sync_progress_crawled,
+            sync_progress_total,
+            last_sync_completed_at,
+            cooldown_active,
+        });
+    }
 
     Json(games).into_response()
 }
@@ -2429,7 +2543,10 @@ async fn api_admin_track_game(
                 let bg_steam = steam.clone();
                 let token = state.start_backfill(app_id).await;
                 tokio::spawn(async move {
-                    crate::backfill_game_history(&bg_state, &bg_steam, app_id, token).await;
+                    crate::backfill_game_history(
+                        &bg_state, &bg_steam, app_id, token, "initial", "system",
+                    )
+                    .await;
                 });
             }
 
@@ -2485,6 +2602,144 @@ async fn api_admin_untrack_game(
             Json(serde_json::json!({ "success": false, "error": e.to_string() })).into_response()
         }
     }
+}
+
+// ── Sync status endpoints ────────────────────────────────────────────
+
+/// GET /api/sync/status — returns sync status for all tracked games (ReadOnly+).
+async fn api_sync_status(State(state): State<AppState>, jar: CookieJar) -> Response {
+    match state.get_session(&jar).await {
+        Some(_) => {} // Any authenticated user can see sync status
+        None => return StatusCode::UNAUTHORIZED.into_response(),
+    }
+
+    let sync_rows = state.db.get_all_sync_statuses().await.unwrap_or_default();
+    let tracked_ids = state.db.get_tracked_game_ids().await.unwrap_or_default();
+
+    let mut statuses: Vec<SyncStatusResponse> = Vec::new();
+    for id in &tracked_ids {
+        if let Some(row) = sync_rows.iter().find(|r| r.app_id == *id) {
+            statuses.push(state.build_sync_status(row).await);
+        } else {
+            // No sync row — game has never been synced or was synced before this feature
+            statuses.push(SyncStatusResponse {
+                app_id: *id,
+                is_syncing: false,
+                sync_type: None,
+                started_at: None,
+                completed_at: None,
+                progress_crawled: 0,
+                progress_total: 0,
+                last_completed_at: None,
+                cooldown_active: false,
+                requested_by: None,
+            });
+        }
+    }
+
+    Json(statuses).into_response()
+}
+
+/// POST /api/admin/sync — trigger a full re-sync for a game (Admin only).
+async fn api_admin_sync(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Json(req): Json<SyncRequest>,
+) -> Response {
+    match state.get_session(&jar).await {
+        Some(s) if s.access_level == AccessLevel::Admin => {}
+        _ => return StatusCode::UNAUTHORIZED.into_response(),
+    }
+
+    let app_id = req.app_id;
+
+    // 1. Verify game is tracked
+    let tracked_ids = state.db.get_tracked_game_ids().await.unwrap_or_default();
+    if !tracked_ids.contains(&app_id) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "success": false, "error": "Game is not being tracked" })),
+        )
+            .into_response();
+    }
+
+    // 2. Check if already syncing (DB check for crash-resilient state)
+    if let Ok(Some(row)) = state.db.get_sync_status(app_id).await {
+        if row.status == "in_progress" {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": "A sync is already in progress for this game"
+                })),
+            )
+                .into_response();
+        }
+
+        // 3. Cooldown check — reject if a full sync completed < 30 min ago
+        if row.status == "completed"
+            && row.sync_type == "full"
+            && let Some(ref completed_at) = row.completed_at
+        {
+            let within_cooldown =
+                chrono::NaiveDateTime::parse_from_str(completed_at, "%Y-%m-%dT%H:%M:%SZ")
+                    .map(|naive| {
+                        let completed = naive.and_utc();
+                        let elapsed = chrono::Utc::now() - completed;
+                        elapsed < chrono::Duration::minutes(30)
+                    })
+                    .unwrap_or(false);
+
+            if within_cooldown {
+                return (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(serde_json::json!({
+                        "success": false,
+                        "error": "A sync was recently completed. Please wait before requesting another."
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    // 4. Need Steam client
+    let steam = match state.get_steam().await {
+        Some(s) => s,
+        None => {
+            return Json(serde_json::json!({
+                "success": false,
+                "error": "Steam API key not configured"
+            }))
+            .into_response();
+        }
+    };
+
+    // 5. Clear crawled_dates + failed_dates for full re-sync
+    if let Err(e) = state.db.clear_sync_progress(app_id).await {
+        return Json(serde_json::json!({
+            "success": false,
+            "error": format!("Failed to clear sync progress: {e}")
+        }))
+        .into_response();
+    }
+
+    // 6. Start backfill
+    let token = state.start_backfill(app_id).await;
+    let bg_state = state.clone();
+    let bg_steam = steam.clone();
+    tokio::spawn(async move {
+        crate::backfill_game_history(&bg_state, &bg_steam, app_id, token, "full", "admin").await;
+    });
+
+    (
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({
+            "success": true,
+            "message": "Full sync started"
+        })),
+    )
+        .into_response()
 }
 
 // ── Static file serving ─────────────────────────────────────────────
@@ -2747,6 +3002,9 @@ pub async fn run_web(bind_addr: String, state: AppState) {
         .route("/api/admin/games", get(api_admin_tracked_games))
         .route("/api/admin/track", post(api_admin_track_game))
         .route("/api/admin/untrack", post(api_admin_untrack_game))
+        .route("/api/admin/sync", post(api_admin_sync))
+        // Sync status (available to all authenticated users)
+        .route("/api/sync/status", get(api_sync_status))
         // Debug routes — uncomment for local testing only
         // .route("/debug/test/{app_id}", get(debug_test_change))
         .layer(middleware::from_fn(csrf_middleware))

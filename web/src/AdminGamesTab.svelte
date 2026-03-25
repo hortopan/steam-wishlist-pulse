@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import type { TrackedGame } from './types';
   import { api, apiPost, AuthError } from './api';
 
@@ -19,6 +19,7 @@
   let trackInput = $state('');
   let trackingLoading = $state(false);
   let trackingAction = $state(false);
+  let pollTimer: ReturnType<typeof setInterval> | null = null;
 
   async function loadTrackedGames() {
     trackingLoading = true;
@@ -31,6 +32,35 @@
       trackingLoading = false;
     }
   }
+
+  function startPolling() {
+    stopPolling();
+    pollTimer = setInterval(async () => {
+      try {
+        trackedGames = await api<TrackedGame[]>('/admin/games');
+        // Stop polling if no games are syncing
+        if (!trackedGames.some(g => g.is_syncing)) {
+          stopPolling();
+        }
+      } catch {
+        // Silently fail — next interval will retry
+      }
+    }, 5000);
+  }
+
+  function stopPolling() {
+    if (pollTimer) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
+  }
+
+  // Start polling whenever any game is syncing
+  $effect(() => {
+    if (trackedGames.some(g => g.is_syncing) && !pollTimer) {
+      startPolling();
+    }
+  });
 
   async function trackGame(e: Event) {
     e.preventDefault();
@@ -72,8 +102,41 @@
     }
   }
 
+  async function syncGame(appId: number) {
+    trackingAction = true;
+    try {
+      const data = await apiPost<{ success: boolean; message?: string; error?: string }>('/admin/sync', { app_id: appId });
+      if (data.success) {
+        showToast('success', data.message!);
+        await loadTrackedGames();
+      } else {
+        showToast('error', data.error || 'Failed to start sync');
+      }
+    } catch (e: any) {
+      if (e instanceof AuthError) { onLogout(); return; }
+      showToast('error', e.message);
+    } finally {
+      trackingAction = false;
+    }
+  }
+
+  function minutesAgo(isoDate: string | null): number {
+    if (!isoDate) return 0;
+    const diff = Date.now() - new Date(isoDate + 'Z').getTime();
+    return Math.max(0, Math.round(diff / 60000));
+  }
+
+  function syncProgressPct(game: TrackedGame): number {
+    if (game.sync_progress_total === 0) return 0;
+    return Math.min(100, Math.round((game.sync_progress_crawled / game.sync_progress_total) * 100));
+  }
+
   onMount(() => {
     loadTrackedGames();
+  });
+
+  onDestroy(() => {
+    stopPolling();
   });
 </script>
 
@@ -129,14 +192,38 @@
           <div class="game-info">
             <span class="game-name">{game.name}</span>
             <span class="game-id">ID: {game.app_id}</span>
+            {#if game.is_syncing}
+              <div class="sync-status">
+                <span class="sync-label">Syncing {game.sync_progress_crawled}/{game.sync_progress_total} days</span>
+                <div class="sync-progress-bar">
+                  <div class="sync-progress-fill" style="width: {syncProgressPct(game)}%"></div>
+                </div>
+              </div>
+            {/if}
           </div>
-          <button
-            class="untrack-btn"
-            onclick={() => untrackGame(game.app_id, game.name)}
-            disabled={trackingAction}
-          >
-            Untrack
-          </button>
+          <div class="game-actions">
+            <button
+              class="sync-btn"
+              onclick={() => syncGame(game.app_id)}
+              disabled={trackingAction || game.is_syncing || game.cooldown_active}
+              title={game.is_syncing ? 'Sync in progress' : game.cooldown_active ? 'Recently synced — please wait' : 'Re-sync all historical data'}
+            >
+              {#if game.is_syncing}
+                Syncing...
+              {:else if game.cooldown_active}
+                Synced {minutesAgo(game.last_sync_completed_at)}m ago
+              {:else}
+                Full Sync
+              {/if}
+            </button>
+            <button
+              class="untrack-btn"
+              onclick={() => untrackGame(game.app_id, game.name)}
+              disabled={trackingAction}
+            >
+              Untrack
+            </button>
+          </div>
         </div>
       {/each}
     </div>
@@ -290,6 +377,63 @@
     color: var(--text-muted);
   }
 
+  .game-actions {
+    display: flex;
+    gap: 0.4rem;
+    flex-shrink: 0;
+  }
+
+  .sync-status {
+    margin-top: 0.25rem;
+  }
+
+  .sync-label {
+    font-size: 0.7rem;
+    color: var(--accent);
+    font-weight: 500;
+  }
+
+  .sync-progress-bar {
+    width: 100%;
+    max-width: 180px;
+    height: 4px;
+    background: var(--border);
+    border-radius: 2px;
+    margin-top: 0.2rem;
+    overflow: hidden;
+  }
+
+  .sync-progress-fill {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 2px;
+    transition: width 0.5s ease;
+  }
+
+  .sync-btn {
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--accent);
+    padding: 0.35rem 0.75rem;
+    border-radius: 0.375rem;
+    font-size: 0.8rem;
+    cursor: pointer;
+    transition:
+      border-color 0.2s,
+      color 0.2s,
+      opacity 0.2s;
+    white-space: nowrap;
+  }
+
+  .sync-btn:hover:not(:disabled) {
+    border-color: var(--accent);
+  }
+
+  .sync-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
   .untrack-btn {
     background: none;
     border: 1px solid var(--border);
@@ -318,7 +462,7 @@
       flex: 1 1 calc(100% - 100px);
     }
 
-    .untrack-btn {
+    .game-actions {
       margin-left: auto;
     }
   }

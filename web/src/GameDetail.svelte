@@ -13,6 +13,7 @@
     PaginatedHistoryResponse,
     HistoryEntry,
     SnapshotCountriesResponse,
+    SyncStatus,
   } from "./types";
   import Chart from "./Chart.svelte";
   import MilestoneCelebration from "./MilestoneCelebration.svelte";
@@ -76,6 +77,7 @@
   let flashRows = $state<Set<string>>(new Set());
   let prevLatest: GameReport | null = null;
   let prevHistoryIds = new Set<number>();
+  let syncStatus = $state<SyncStatus | null>(null);
 
   function schedulePoll() {
     pollTimer = setTimeout(async () => {
@@ -113,6 +115,16 @@
 
       if (newDetail.latest) prevLatest = { ...newDetail.latest };
       detail = newDetail;
+
+      // Fetch sync status
+      try {
+        const statuses = await api<SyncStatus[]>("/sync/status", { signal });
+        if (!destroyed) {
+          syncStatus = statuses.find((s) => s.app_id === appId) ?? null;
+        }
+      } catch {
+        // Non-critical
+      }
 
       // Refresh chart and first page of history on each poll
       chartAbortController?.abort();
@@ -275,6 +287,14 @@
           <span class="hero-updated"
             >Latest data {timeAgo(detail.latest.changed_at, now)}</span
           >
+        {/if}
+        {#if syncStatus?.is_syncing}
+          <div class="hero-sync">
+            <span class="hero-sync-label">Historical data sync in progress ({syncStatus.progress_crawled}/{syncStatus.progress_total} days)</span>
+            <div class="hero-sync-bar">
+              <div class="hero-sync-fill" style="width: {syncStatus.progress_total > 0 ? Math.min(100, Math.round((syncStatus.progress_crawled / syncStatus.progress_total) * 100)) : 0}%"></div>
+            </div>
+          </div>
         {/if}
         <div class="hero-links">
           <a href={`https://store.steampowered.com/app/${detail.app_id}`} target="_blank" rel="noopener noreferrer" class="hero-link">
@@ -681,6 +701,36 @@
        1px  1px 0 rgba(0, 0, 0, 0.7),
        0 2px 6px rgba(0, 0, 0, 0.8),
        0 0 12px rgba(0, 0, 0, 0.5);
+  }
+
+  .hero-sync {
+    margin-top: 0.4rem;
+  }
+
+  .hero-sync-label {
+    font-size: 0.75rem;
+    color: var(--accent);
+    text-shadow:
+      -1px -1px 0 rgba(0, 0, 0, 0.7),
+       1px -1px 0 rgba(0, 0, 0, 0.7),
+      -1px  1px 0 rgba(0, 0, 0, 0.7),
+       1px  1px 0 rgba(0, 0, 0, 0.7);
+  }
+
+  .hero-sync-bar {
+    width: 200px;
+    height: 4px;
+    background: rgba(255, 255, 255, 0.2);
+    border-radius: 2px;
+    margin-top: 0.25rem;
+    overflow: hidden;
+  }
+
+  .hero-sync-fill {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 2px;
+    transition: width 0.5s ease;
   }
 
   .hero-links {
