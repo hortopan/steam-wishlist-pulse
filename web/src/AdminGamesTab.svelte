@@ -2,7 +2,7 @@
   import { onMount, onDestroy } from 'svelte';
   import type { TrackedGame } from './types';
   import { api, apiPost, AuthError } from './api';
-  import { minutesAgo } from './utils';
+  import { timeAgo } from './utils';
 
   let {
     onLogout,
@@ -157,8 +157,6 @@
     }
   }
 
-  // minutesAgo imported from utils
-
   function syncProgressPct(game: TrackedGame): number {
     if (game.sync_progress_total === 0) return 0;
     return Math.min(100, Math.round((game.sync_progress_crawled / game.sync_progress_total) * 100));
@@ -246,9 +244,9 @@
               {#if game.is_syncing}
                 Syncing...
               {:else if game.cooldown_active}
-                Last full sync {minutesAgo(game.last_sync_completed_at)}m ago
+                Last full sync {timeAgo(game.last_sync_completed_at!)}
               {:else if game.last_sync_completed_at}
-                Re-sync (last {minutesAgo(game.last_sync_completed_at)}m ago)
+                Re-sync (last sync {timeAgo(game.last_sync_completed_at)})
               {:else}
                 Full Sync
               {/if}

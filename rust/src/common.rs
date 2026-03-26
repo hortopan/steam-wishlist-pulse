@@ -218,11 +218,7 @@ impl ChangeMessage {
                         let abs_rate = m.current_rate.abs();
                         let abs_median = m.mean.abs();
                         let detail = if abs_median < 0.01 {
-                            if m.current_rate > 0.0 {
-                                format!("surged to {:.0}/day from near-zero baseline", abs_rate)
-                            } else {
-                                format!("dropped to {:.0}/day from near-zero baseline", abs_rate)
-                            }
+                            format!("spiked to {:.0}/day from near-zero baseline", abs_rate)
                         } else {
                             let ratio = abs_rate / abs_median;
                             let direction = if m.current_rate > m.mean {
@@ -272,13 +268,8 @@ impl ChangeMessage {
                         "below"
                     };
                     if abs_median < 0.01 {
-                        let verb = if c.current_rate > 0.0 {
-                            "surged"
-                        } else {
-                            "dropped"
-                        };
                         format!(
-                            "{}: {} {verb} to {:.0}/day from near-zero",
+                            "{}: {} spiked to {:.0}/day from near-zero",
                             c.country_code, c.metric, abs_rate
                         )
                     } else {

@@ -28,11 +28,6 @@
     value: number;
     prevValue: number | null;
   } | null>(null);
-  let hoveredAnomaly = $state<{
-    x: number;
-    y: number;
-    entry: ChartPoint;
-  } | null>(null);
 
   const CHART_W = 800;
   const CHART_H = 300;
@@ -131,21 +126,30 @@
       );
     }
 
-    // Collect anomaly marker positions (one per anomalous chart point, at topmost y)
-    const anomalyPoints: { x: number; y: number; entry: ChartPoint }[] = [];
+    // Collect anomaly marker positions (one per anomalous metric per chart point)
+    const anomalyPoints: { x: number; y: number; entry: ChartPoint; metric: string; direction: 'up' | 'down' }[] = [];
     for (let i = 0; i < entries.length; i++) {
-      if (!entries[i].is_anomaly) continue;
+      const am = entries[i].anomaly_metrics;
+      if (!am) continue;
       const x = xScale(i);
-      let minY = PAD.top + plotH; // bottom
       for (const m of activeKeys) {
+        if (!(am as any)[m]) continue;
         const v = (entries[i] as any)[m] as number;
         const y = yScale(v);
-        if (y < minY) minY = y;
+        // Determine direction from description or previous value
+        const desc = (am.descriptions ?? []).find(d => d.toLowerCase().startsWith(m));
+        const isUp = desc ? /above|spike/i.test(desc) : (i > 0 ? v > ((entries[i - 1] as any)[m] as number) : true);
+        anomalyPoints.push({ x, y, entry: entries[i], metric: m, direction: isUp ? 'up' : 'down' });
       }
-      anomalyPoints.push({ x, y: minY, entry: entries[i] });
     }
 
-    return { paths, yTicks, xLabels: filteredXLabels, plotW, plotH, anomalyPoints };
+    // Build lookup: "pointIndex-metric" → direction
+    const anomalyDir = new Map<string, 'up' | 'down'>();
+    for (const ap of anomalyPoints) {
+      anomalyDir.set(`${ap.x}-${ap.metric}`, ap.direction);
+    }
+
+    return { paths, yTicks, xLabels: filteredXLabels, plotW, plotH, anomalyPoints, anomalyDir };
   }
 
   let chartData = $derived(buildChartData(history, activeMetrics));
@@ -238,17 +242,32 @@
             opacity="0.9"
           />
           {#each pathData.points as pt}
+            {@const isAnomaly = !!(pt.entry.anomaly_metrics as any)?.[metric]}
+            {@const isHovered = hoveredPoint?.x === pt.cx && hoveredPoint?.metric === metric}
+            {@const dir = isAnomaly ? chartData.anomalyDir.get(`${pt.cx}-${metric}`) : null}
             <!-- svelte-ignore a11y_no_static_element_interactions -->
+            {#if isAnomaly}
+              <circle
+                cx={pt.cx}
+                cy={pt.cy}
+                r={isHovered ? 14 : 11}
+                fill="none"
+                stroke={METRIC_CONFIG[metric].color}
+                stroke-width="1.5"
+                opacity="0.4"
+                class="anomaly-ring"
+              />
+            {/if}
             <circle
               cx={pt.cx}
               cy={pt.cy}
-              r={hoveredPoint?.x === pt.cx &&
-              hoveredPoint?.metric === metric
-                ? 6
-                : 4}
-              fill={METRIC_CONFIG[metric].color}
-              stroke="var(--surface)"
-              stroke-width="2"
+              r={isHovered ? 8 : isAnomaly ? 7 : 4}
+              fill={isAnomaly
+                ? dir === 'up' ? METRIC_CONFIG[metric].color : 'var(--surface)'
+                : METRIC_CONFIG[metric].color}
+              stroke={METRIC_CONFIG[metric].color}
+              stroke-width={isAnomaly ? 2.5 : 2}
+              opacity={isAnomaly && dir === 'down' ? 0.6 : 1}
               style="cursor: pointer;"
               onmouseenter={() =>
                 (hoveredPoint = {
@@ -260,45 +279,36 @@
                   prevValue: pt.prevValue,
                 })}
             />
+            {#if isAnomaly}
+              <text
+                x={pt.cx}
+                y={pt.cy + (dir === 'down' ? 0.5 : -0.5)}
+                fill={dir === 'up' ? 'var(--surface)' : METRIC_CONFIG[metric].color}
+                font-size="9"
+                font-weight="bold"
+                text-anchor="middle"
+                dominant-baseline="central"
+                style="pointer-events: none;"
+              >{dir === 'up' ? '▲' : '▼'}</text>
+            {/if}
           {/each}
-        {/each}
-
-        <!-- Anomaly markers -->
-        {#each chartData.anomalyPoints as ap}
-          <g
-            style="cursor: pointer"
-            onmouseenter={() => hoveredAnomaly = { x: ap.x, y: ap.y, entry: ap.entry }}
-            onmouseleave={() => hoveredAnomaly = null}
-          >
-            <polygon
-              points="{ap.x},{ap.y - 16} {ap.x - 6},{ap.y - 6} {ap.x + 6},{ap.y - 6}"
-              fill="var(--red)"
-              opacity="0.9"
-            />
-            <text
-              x={ap.x}
-              y={ap.y - 8}
-              fill="white"
-              font-size="8"
-              font-weight="bold"
-              text-anchor="middle"
-              dominant-baseline="middle"
-            >!</text>
-          </g>
         {/each}
       </svg>
 
       {#if hoveredPoint}
         {@const tipX = (hoveredPoint.x / CHART_W) * 100}
         {@const tipY = (hoveredPoint.y / CHART_H) * 100}
+        {@const hpAnomaly = !!(hoveredPoint.entry.anomaly_metrics as any)?.[hoveredPoint.metric]}
+        {@const anomalyDescs = hpAnomaly ? (hoveredPoint!.entry.anomaly_metrics?.descriptions ?? []).filter(d => d.toLowerCase().startsWith(hoveredPoint!.metric)) : []}
         <div
           class="tooltip"
+          class:anomaly-tooltip={hpAnomaly}
           style="left: {tipX}%; top: {tipY}%; transform: translate({tipX >
           80
             ? '-100%'
             : tipX < 20
               ? '0%'
-              : '-50%'}, -120%);"
+              : '-50%'}, -120%);{hpAnomaly ? ` border-color: ${METRIC_CONFIG[hoveredPoint.metric].color};` : ''}"
         >
           <div class="tooltip-date">
             {hoveredPoint.entry.label}
@@ -314,31 +324,13 @@
               <span class="tooltip-delta" class:positive={delta > 0} class:negative={delta < 0}>({delta > 0 ? '+' : ''}{delta.toLocaleString()})</span>
             {/if}
           </div>
-          <div class="tooltip-resolution">{resolution}</div>
-        </div>
-      {/if}
-
-      {#if hoveredAnomaly}
-        {@const tipX = (hoveredAnomaly.x / CHART_W) * 100}
-        {@const tipY = (hoveredAnomaly.y / CHART_H) * 100}
-        {@const descs = hoveredAnomaly.entry.anomaly_metrics?.descriptions ?? []}
-        <div
-          class="tooltip anomaly-tooltip"
-          style="left: {tipX}%; top: {tipY}%; transform: translate({tipX >
-          80
-            ? '-100%'
-            : tipX < 20
-              ? '0%'
-              : '-50%'}, -120%);"
-        >
-          <div class="tooltip-date">{hoveredAnomaly.entry.label}</div>
-          {#if descs.length > 0}
-            {#each descs as desc}
+          {#if anomalyDescs.length > 0}
+            <div class="anomaly-divider"></div>
+            {#each anomalyDescs as desc}
               <div class="anomaly-desc">{desc}</div>
             {/each}
-          {:else}
-            <div class="anomaly-desc">Anomalous change detected</div>
           {/if}
+          <div class="tooltip-resolution">{resolution}</div>
         </div>
       {/if}
     </div>
@@ -491,6 +483,15 @@
     transition: r 0.15s ease-out;
   }
 
+  .chart-container svg .anomaly-ring {
+    animation: anomaly-pulse 2s ease-in-out infinite;
+  }
+
+  @keyframes anomaly-pulse {
+    0%, 100% { opacity: 0.15; }
+    50% { opacity: 0.5; }
+  }
+
   .tooltip {
     position: absolute;
     background: var(--bg);
@@ -539,13 +540,20 @@
   }
 
   .anomaly-tooltip {
-    border-color: var(--red);
+    border-width: 1.5px;
+  }
+
+
+  .anomaly-divider {
+    border-top: 1px solid var(--border);
+    margin: 0.3rem 0;
   }
 
   .anomaly-desc {
-    font-size: 0.78rem;
-    color: var(--red);
+    font-size: 0.75rem;
+    color: var(--text-muted);
     font-weight: 500;
+    font-style: italic;
   }
 
   .anomaly-desc + .anomaly-desc {

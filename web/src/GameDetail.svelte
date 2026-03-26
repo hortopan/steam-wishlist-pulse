@@ -80,6 +80,36 @@
   let prevHistoryIds = new Set<number>();
   let syncStatus = $state<SyncStatus | null>(null);
 
+  // Anomaly popover state
+  let anomalyPopover = $state<{
+    x: number;
+    y: number;
+    metric: string;
+    desc: string;
+  } | null>(null);
+  let anomalyPopoverTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function showAnomalyPopover(e: MouseEvent, entry: HistoryEntry, metric: string) {
+    if (anomalyPopoverTimer) clearTimeout(anomalyPopoverTimer);
+    const rect = (e.target as HTMLElement).getBoundingClientRect();
+    const am = entry.anomaly_metrics;
+    const desc = (am?.descriptions ?? []).find(d => d.toLowerCase().startsWith(metric)) ?? 'Anomalous change detected';
+    anomalyPopover = { x: rect.left + rect.width / 2, y: rect.top, metric, desc };
+  }
+
+  function hideAnomalyPopover() {
+    anomalyPopoverTimer = setTimeout(() => { anomalyPopover = null; }, 150);
+  }
+
+  function toggleAnomalyPopover(e: MouseEvent, entry: HistoryEntry, metric: string) {
+    e.stopPropagation();
+    if (anomalyPopover && anomalyPopover.metric === metric) {
+      anomalyPopover = null;
+    } else {
+      showAnomalyPopover(e, entry, metric);
+    }
+  }
+
   function schedulePoll() {
     pollTimer = setTimeout(async () => {
       await fetchDetail();
@@ -471,15 +501,31 @@
             </thead>
             <tbody>
               {#each historyData.entries as entry}
-                <tr class:flash-row={flashRows.has(entry.date)} class:anomaly-row={entry.is_anomaly}>
+                <tr class:flash-row={flashRows.has(entry.date)}>
                   <td>
-                    {#if entry.is_anomaly}<span class="anomaly-badge" title="Anomalous change detected">&#9888;</span>{/if}
                     {entry.date.split("T")[0]}
                   </td>
-                  <td class="num adds">{entry.adds.toLocaleString()}</td>
-                  <td class="num deletes">{entry.deletes.toLocaleString()}</td>
-                  <td class="num purchases">{entry.purchases.toLocaleString()}</td>
-                  <td class="num gifts">{entry.gifts.toLocaleString()}</td>
+                  {#each ['adds', 'deletes', 'purchases', 'gifts'] as metric}
+                    {@const am = entry.anomaly_metrics}
+                    {@const isAnomaly = !!(am as any)?.[metric]}
+                    {@const desc = isAnomaly ? (am?.descriptions ?? []).find(d => d.toLowerCase().startsWith(metric)) : null}
+                    {@const isUp = desc ? /above|spike/i.test(desc) : false}
+                    <td class="num {metric}">
+                      {((entry as any)[metric] as number).toLocaleString()}
+                      {#if isAnomaly}
+                        <button
+                          type="button"
+                          class="anomaly-arrow"
+                          class:up={isUp}
+                          class:down={!isUp}
+                          onclick={(e: MouseEvent) => toggleAnomalyPopover(e, entry, metric)}
+                          onmouseenter={(e: MouseEvent) => showAnomalyPopover(e, entry, metric)}
+                          onmouseleave={() => hideAnomalyPopover()}
+                          title={desc ?? 'Anomalous change detected'}
+                        >{isUp ? '▲' : '▼'}</button>
+                      {/if}
+                    </td>
+                  {/each}
                   <td class="num platform-val">{entry.adds_windows.toLocaleString()}</td>
                   <td class="num platform-val">{entry.adds_mac.toLocaleString()}</td>
                   <td class="num platform-val">{entry.adds_linux.toLocaleString()}</td>
@@ -505,17 +551,6 @@
                     </button>
                   </td>
                 </tr>
-                {#if entry.is_anomaly && entry.anomaly_metrics?.descriptions?.length}
-                  <tr class="anomaly-detail-row">
-                    <td colspan="10">
-                      <div class="anomaly-detail">
-                        {#each entry.anomaly_metrics.descriptions as desc}
-                          <span class="anomaly-detail-line">{desc}</span>
-                        {/each}
-                      </div>
-                    </td>
-                  </tr>
-                {/if}
                 {#if expandedCountries.has(entry.snapshot_id)}
                   {@const countries = expandedCountries.get(entry.snapshot_id) ?? []}
                   {@const sorted = [...countries].sort((a, b) => b.adds - a.adds)}
@@ -541,6 +576,14 @@
             </tbody>
           </table>
         </div>
+        {#if anomalyPopover}
+          <div
+            class="anomaly-popover"
+            style="left: {anomalyPopover.x}px; top: {anomalyPopover.y}px;"
+          >
+            {anomalyPopover.desc}
+          </div>
+        {/if}
         <!-- Pagination controls -->
         <div class="pagination-row">
           <button
@@ -1076,42 +1119,40 @@
     font-size: 0.8rem;
   }
 
-  .history-table tbody tr.anomaly-row {
-    background: rgba(239, 68, 68, 0.06);
-    border-left: 3px solid var(--red);
+  .anomaly-arrow {
+    display: inline-block;
+    font-size: 0.6rem;
+    margin-left: 0.25rem;
+    cursor: pointer;
+    vertical-align: middle;
+    background: none;
+    border: none;
+    padding: 0;
+    font: inherit;
+    line-height: 1;
   }
 
-  .history-table tbody tr.anomaly-row:hover {
-    background: rgba(239, 68, 68, 0.1);
+  .anomaly-arrow.up {
+    color: var(--green);
   }
 
-  .anomaly-badge {
+  .anomaly-arrow.down {
     color: var(--red);
-    font-size: 0.85rem;
-    margin-right: 0.3rem;
-    cursor: help;
   }
 
-  .anomaly-detail-row td {
-    padding-top: 0.25rem !important;
-    padding-bottom: 0.6rem !important;
-    padding-left: 1rem !important;
-    border-top: none !important;
-    background: rgba(239, 68, 68, 0.06);
-    border-left: 3px solid var(--red);
-  }
-
-  .anomaly-detail {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.35rem 1rem;
-    padding: 0.25rem 0;
-  }
-
-  .anomaly-detail-line {
+  .anomaly-popover {
+    position: fixed;
+    transform: translate(-50%, -100%) translateY(-8px);
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+    padding: 0.4rem 0.65rem;
     font-size: 0.75rem;
-    color: var(--red);
-    opacity: 0.85;
+    color: var(--text);
+    white-space: nowrap;
+    z-index: 100;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+    pointer-events: none;
     line-height: 1.4;
   }
 

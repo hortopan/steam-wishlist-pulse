@@ -1693,15 +1693,6 @@ fn compute_anomaly_inner(
         return AnomalyMetrics::default();
     }
 
-    // Find the previous snapshot (the one just before this one in time)
-    let prev_idx = context.iter().rposition(|(s, _)| *s < curr_secs);
-
-    let prev_idx = match prev_idx {
-        Some(i) => i,
-        None => return AnomalyMetrics::default(),
-    };
-    let (prev_secs, prev) = context[prev_idx];
-
     // Find lookback window: points from (curr - lookback) up to (but not including) curr
     let window_start_secs = curr_secs - lookback_secs;
     let window: Vec<(f64, &crate::db::ChartPoint)> = context
@@ -1714,48 +1705,55 @@ fn compute_anomaly_inner(
         return AnomalyMetrics::default();
     }
 
-    let days_elapsed = (curr_secs - prev_secs) / 86400.0;
-    let days_elapsed = if days_elapsed <= 0.0 {
-        1.0
-    } else {
-        days_elapsed
+    // Group window snapshots by calendar day and sum values per day.
+    // This normalizes for uneven snapshot distribution (some days have 3, others 10).
+    let curr_day = (curr_secs / 86400.0).floor() as i64;
+    fn day_key(secs: f64) -> i64 {
+        (secs / 86400.0).floor() as i64
+    }
+
+    // Build per-day sums for a given metric across the lookback window
+    let build_daily_sums = |get_val: &dyn Fn(&crate::db::ChartPoint) -> i64| -> Vec<f64> {
+        let mut day_map: std::collections::BTreeMap<i64, i64> = std::collections::BTreeMap::new();
+        for (s, p) in &window {
+            let dk = day_key(*s);
+            *day_map.entry(dk).or_insert(0) += get_val(p);
+        }
+        day_map.values().map(|v| *v as f64).collect()
     };
 
+    // Sum today's snapshots for the current value (in case there are multiple snapshots today)
+    let sum_current_day = |curr_val: i64, get_val: &dyn Fn(&crate::db::ChartPoint) -> i64| -> f64 {
+        // Sum all context snapshots from the same calendar day as curr_secs
+        let mut total: i64 = context
+            .iter()
+            .filter(|(s, _)| day_key(*s) == curr_day && *s < curr_secs)
+            .map(|(_, p)| get_val(p))
+            .sum();
+        total += curr_val;
+        total as f64
+    };
+
+    // Snapshot values are already per-period counts — aggregate to daily totals
+    // and compare today's total against the historical daily distribution.
     let check_metric = |name: &str,
                         curr_val: i64,
-                        prev_val: i64,
                         get_val: &dyn Fn(&crate::db::ChartPoint) -> i64|
      -> (bool, Option<String>) {
-        let raw_delta = curr_val - prev_val;
-        if raw_delta == 0 {
+        let mut daily_values = build_daily_sums(get_val);
+        if daily_values.len() < 3 {
             return (false, None);
         }
-        if raw_delta.abs() < config.min_absolute {
-            return (false, None);
-        }
-        let current_rate = raw_delta as f64 / days_elapsed;
 
-        let mut rates: Vec<f64> = window
-            .windows(2)
-            .filter_map(|w| {
-                let d = (w[1].0 - w[0].0) / 86400.0;
-                if d <= 0.0 {
-                    return None;
-                }
-                let raw = get_val(w[1].1) - get_val(w[0].1);
-                Some(raw as f64 / d)
-            })
-            .collect();
-        if rates.len() < 3 {
-            return (false, None);
-        }
-        let median = crate::anomaly::f64_median_pub(&mut rates);
-        let mad = crate::anomaly::f64_mad_pub(&mut rates, median);
+        let current_daily = sum_current_day(curr_val, get_val);
+        let median = crate::anomaly::f64_median_pub(&mut daily_values);
+        let mad = crate::anomaly::f64_mad_pub(&mut daily_values, median);
         let effective_mad = crate::anomaly::apply_mad_floor_pub(mad, median, config.mad_floor_pct);
+
+        let deviation = current_daily - median;
         let is_anomalous = if effective_mad == 0.0 {
-            (current_rate - median).abs() > f64::EPSILON
+            deviation.abs() > f64::EPSILON
         } else {
-            let deviation = current_rate - median;
             let z = deviation.abs() / effective_mad;
             if deviation >= 0.0 {
                 z > config.sensitivity_up
@@ -1764,19 +1762,17 @@ fn compute_anomaly_inner(
             }
         };
         if is_anomalous {
-            let desc = format_anomaly_description(name, current_rate, median);
+            let desc = format_anomaly_description(name, current_daily, median);
             (true, Some(desc))
         } else {
             (false, None)
         }
     };
 
-    let (adds_flag, adds_desc) = check_metric("Adds", adds, prev.adds, &|p| p.adds);
-    let (deletes_flag, deletes_desc) =
-        check_metric("Deletes", deletes, prev.deletes, &|p| p.deletes);
-    let (purchases_flag, purchases_desc) =
-        check_metric("Purchases", purchases, prev.purchases, &|p| p.purchases);
-    let (gifts_flag, gifts_desc) = check_metric("Gifts", gifts, prev.gifts, &|p| p.gifts);
+    let (adds_flag, adds_desc) = check_metric("Adds", adds, &|p| p.adds);
+    let (deletes_flag, deletes_desc) = check_metric("Deletes", deletes, &|p| p.deletes);
+    let (purchases_flag, purchases_desc) = check_metric("Purchases", purchases, &|p| p.purchases);
+    let (gifts_flag, gifts_desc) = check_metric("Gifts", gifts, &|p| p.gifts);
 
     let descriptions: Vec<String> = [adds_desc, deletes_desc, purchases_desc, gifts_desc]
         .into_iter()
@@ -1793,39 +1789,36 @@ fn compute_anomaly_inner(
 }
 
 /// Generate a human-readable anomaly description.
-fn format_anomaly_description(metric_name: &str, current_rate: f64, median: f64) -> String {
-    let abs_rate = current_rate.abs();
-    let abs_median = median.abs();
-
-    if abs_median < 0.01 {
+/// `current` and `median` are daily totals (already aggregated per day).
+fn format_anomaly_description(metric_name: &str, current: f64, median: f64) -> String {
+    if median < 0.5 {
         // Baseline was essentially zero
-        if current_rate > 0.0 {
-            format!(
-                "{metric_name} surged to {:.0}/day from near-zero baseline",
-                abs_rate
-            )
+        if current < 0.5 {
+            format!("{metric_name} unusual activity detected")
         } else {
             format!(
-                "{metric_name} dropped to {:.0}/day from near-zero baseline",
-                abs_rate
+                "{metric_name} spiked to {:.0}/day from near-zero baseline",
+                current
             )
         }
     } else {
-        let ratio = abs_rate / abs_median;
-        let direction = if current_rate > median {
-            "above"
+        let direction = if current > median { "above" } else { "below" };
+        let ratio = if current > median {
+            current / median
+        } else if current > 0.5 {
+            median / current
         } else {
-            "below"
+            median // drop to ~0 from median
         };
         if ratio >= 2.0 {
             format!(
                 "{metric_name} {:.0}× {direction} normal ({:.0}/day vs ~{:.0}/day)",
-                ratio, abs_rate, abs_median
+                ratio, current, median
             )
         } else {
             format!(
                 "{metric_name} unusual at {:.0}/day ({direction} ~{:.0}/day typical)",
-                abs_rate, abs_median
+                current, median
             )
         }
     }

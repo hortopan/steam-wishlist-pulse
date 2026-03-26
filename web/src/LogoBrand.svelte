@@ -1,4 +1,5 @@
 <script lang="ts">
+  // @ts-ignore - vite image import with query params
   import logoSrc from './assets/logo.png?w=160&format=webp';
 
   let { size = 'default' }: { size?: 'default' | 'large' } = $props();

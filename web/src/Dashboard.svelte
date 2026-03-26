@@ -169,7 +169,7 @@
             {/if}
           </div>
           {#if syncStatuses.get(game.app_id)?.is_syncing}
-            <SyncProgressBar syncStatus={syncStatuses.get(game.app_id)} />
+            <SyncProgressBar syncStatus={syncStatuses.get(game.app_id)!} />
           {/if}
           <div
             class="stat-net"
