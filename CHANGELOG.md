@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.8] - 2026-03-26
+
+### Other
+
+- Auto build and publish docker image on release
+- QOL visuals, some bug fixes
+
 ## [0.1.7] - 2026-03-25
 
 ### Features
@@ -18,6 +25,7 @@ All notable changes to this project will be documented in this file.
 - Issue with annomaly message
 - Test
 - Formatting
+- Clipy
 
 ### Other
 
