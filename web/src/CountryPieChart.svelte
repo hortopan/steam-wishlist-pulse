@@ -5,9 +5,11 @@
 
   let {
     countries,
+    rangeLabel = '',
     loading = false,
   }: {
     countries: CountryEntry[];
+    rangeLabel?: string;
     loading?: boolean;
   } = $props();
 
@@ -142,7 +144,7 @@
 
 <div class="pie-section">
   <div class="pie-header">
-    <h2>Country Distribution</h2>
+    <h2>Country Distribution {#if rangeLabel}<span class="range-badge">({rangeLabel})</span>{/if}</h2>
     <div class="metric-selector">
       {#each METRIC_KEYS as key}
         {@const cfg = METRIC_CONFIG[key]}
@@ -170,6 +172,8 @@
         <svg viewBox="0 0 {SIZE} {SIZE}" width="{SIZE}" height="{SIZE}">
           {#each slices as slice, i}
             <path
+              role="img"
+              aria-label="{slice.label}: {slice.value.toLocaleString()} ({(slice.pct * 100).toFixed(1)}%)"
               d={slice.d}
               fill={slice.color}
               stroke="var(--surface)"
@@ -209,6 +213,7 @@
       <div class="pie-legend">
         {#each slices as slice, i}
           <div
+            role="listitem"
             class="pie-legend-item"
             class:dimmed={hoveredIndex !== null && hoveredIndex !== i}
             onmouseenter={(e) => { hoveredIndex = i; }}
@@ -247,6 +252,12 @@
     font-size: 1.1rem;
     font-weight: 600;
     margin: 0;
+  }
+
+  .range-badge {
+    font-weight: 400;
+    color: var(--text-muted);
+    font-size: 0.9rem;
   }
 
   .metric-selector {

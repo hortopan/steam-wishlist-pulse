@@ -472,7 +472,7 @@
     {/if}
 
     {#if countryChartData && countryChartData.countries.length > 0}
-      <CountryPieChart countries={countryChartData.countries} loading={countryChartLoading} />
+      <CountryPieChart countries={countryChartData.countries} rangeLabel={CHART_RANGES.find(r => r.key === chartRange)?.label ?? ''} loading={countryChartLoading} />
     {/if}
 
     <!-- Top Countries (latest snapshot) -->
