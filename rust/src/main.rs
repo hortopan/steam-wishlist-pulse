@@ -570,10 +570,25 @@ async fn polling_loop(state: AppState, poll_interval_minutes: u64) {
                             let is_real_anomaly = anomaly_result.is_anomalous
                                 && !anomaly_result.insufficient_data
                                 && !anomaly_result.error;
+
+                            // Apply anomaly cooldown: suppress repeated anomaly-only alerts
+                            // for the same app+date within a 4-hour window.
+                            let anomaly_in_cooldown = if is_real_anomaly {
+                                state.check_anomaly_cooldown(report.app_id, &report.date).await
+                            } else {
+                                false
+                            };
+
                             let should_notify = if notification_mode == "anomalies_only" {
                                 if anomaly_result.error {
                                     tracing::warn!(
                                         "Anomaly detection failed for app {} — skipping notification (transient error)",
+                                        report.app_id,
+                                    );
+                                    false
+                                } else if is_real_anomaly && anomaly_in_cooldown {
+                                    tracing::info!(
+                                        "Anomaly detected for app {} but within cooldown — skipping duplicate notification",
                                         report.app_id,
                                     );
                                     false
@@ -597,12 +612,15 @@ async fn polling_loop(state: AppState, poll_interval_minutes: u64) {
                                     false
                                 }
                             } else {
+                                // "every_update" mode: always notify, but apply cooldown to anomaly context
+                                // to avoid highlighting the same anomaly repeatedly
                                 true
                             };
 
                             if should_notify {
                                 // Only attach anomaly context when we have a real detection
-                                let anomaly_ref = if is_real_anomaly {
+                                // that is not within cooldown (avoids repeated anomaly highlighting)
+                                let anomaly_ref = if is_real_anomaly && !anomaly_in_cooldown {
                                     Some(&anomaly_result)
                                 } else {
                                     None

@@ -144,6 +144,9 @@ pub struct AppState {
     encryption_secret: Option<SecretString>,
     backfill_tokens: Arc<tokio::sync::Mutex<HashMap<u32, tokio_util::sync::CancellationToken>>>,
     pub backfill_rate: f64,
+    /// Tracks when the last anomaly notification was sent per (app_id, date).
+    /// Used to suppress repeated anomaly alerts within a cooldown window.
+    anomaly_cooldowns: Arc<tokio::sync::Mutex<HashMap<(u32, String), Instant>>>,
 }
 
 impl AppState {
@@ -169,7 +172,26 @@ impl AppState {
             encryption_secret,
             backfill_tokens: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             backfill_rate,
+            anomaly_cooldowns: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Check if an anomaly notification is within cooldown for a given app+date.
+    /// Returns `true` if the notification should be suppressed.
+    /// If not suppressed, records the current time as the last notification.
+    pub async fn check_anomaly_cooldown(&self, app_id: u32, date: &str) -> bool {
+        const COOLDOWN_HOURS: u64 = 4;
+        let mut cooldowns = self.anomaly_cooldowns.lock().await;
+        let key = (app_id, date.to_string());
+        if let Some(last_sent) = cooldowns.get(&key) {
+            if last_sent.elapsed() < std::time::Duration::from_secs(COOLDOWN_HOURS * 3600) {
+                return true; // still in cooldown, suppress
+            }
+        }
+        cooldowns.insert(key, Instant::now());
+        // Clean up old entries (older than 48 hours) to prevent unbounded growth
+        cooldowns.retain(|_, v| v.elapsed() < std::time::Duration::from_secs(48 * 3600));
+        false // not suppressed
     }
 
     /// Encrypt a value if an encryption secret is configured, otherwise return plaintext.
@@ -1653,6 +1675,7 @@ fn compute_anomaly_for_snapshot(
     let curr_secs = crate::db::label_to_epoch_secs(curr_ts);
     compute_anomaly_inner(
         curr_secs,
+        &snapshot.date,
         snapshot.adds,
         snapshot.deletes,
         snapshot.purchases,
@@ -1673,6 +1696,7 @@ fn compute_anomaly_for_chart_point(
     let curr_secs = crate::db::label_to_epoch_secs(&point.label);
     compute_anomaly_inner(
         curr_secs,
+        &point.date,
         point.adds,
         point.deletes,
         point.purchases,
@@ -1684,9 +1708,14 @@ fn compute_anomaly_for_chart_point(
 }
 
 /// Shared anomaly detection logic.
+///
+/// Groups context snapshots by Steam date (not UTC day) and compares the current
+/// day's running total against historical daily maxes. Uses the same MAD-based
+/// algorithm as the notification path in anomaly.rs.
 #[allow(clippy::too_many_arguments)]
 fn compute_anomaly_inner(
     curr_secs: f64,
+    curr_date: &str,
     adds: i64,
     deletes: i64,
     purchases: i64,
@@ -1695,7 +1724,7 @@ fn compute_anomaly_inner(
     config: &crate::anomaly::AnomalyConfig,
     lookback_secs: f64,
 ) -> AnomalyMetrics {
-    if context.len() < 4 {
+    if context.len() < 3 {
         return AnomalyMetrics::default();
     }
 
@@ -1707,56 +1736,63 @@ fn compute_anomaly_inner(
         .copied()
         .collect();
 
-    if window.len() < 4 {
+    if window.len() < 3 {
         return AnomalyMetrics::default();
     }
 
-    // Group window snapshots by calendar day and sum values per day.
-    // This normalizes for uneven snapshot distribution (some days have 3, others 10).
-    let curr_day = (curr_secs / 86400.0).floor() as i64;
-    fn day_key(secs: f64) -> i64 {
-        (secs / 86400.0).floor() as i64
-    }
-
-    // Build per-day sums for a given metric across the lookback window
-    let build_daily_sums = |get_val: &dyn Fn(&crate::db::ChartPoint) -> i64| -> Vec<f64> {
-        let mut day_map: std::collections::BTreeMap<i64, i64> = std::collections::BTreeMap::new();
-        for (s, p) in &window {
-            let dk = day_key(*s);
-            *day_map.entry(dk).or_insert(0) += get_val(p);
+    // Group window snapshots by Steam date and take MAX per day.
+    // Steam values are per-date running totals (each snapshot has the cumulative
+    // daily count), so MAX gives the true daily total. SUM would be wrong.
+    // Uses the `date` field (Steam reporting date) instead of UTC epoch math
+    // to avoid mis-bucketing near the Pacific midnight boundary.
+    let build_daily_maxes = |get_val: &dyn Fn(&crate::db::ChartPoint) -> i64| -> Vec<f64> {
+        let mut day_map: std::collections::BTreeMap<&str, i64> = std::collections::BTreeMap::new();
+        for (_s, p) in &window {
+            // Exclude current day from the baseline
+            if p.date == curr_date {
+                continue;
+            }
+            let val = get_val(p);
+            let entry = day_map.entry(&p.date).or_insert(val);
+            if val > *entry {
+                *entry = val;
+            }
         }
         day_map.values().map(|v| *v as f64).collect()
     };
 
-    // Sum today's snapshots for the current value (in case there are multiple snapshots today)
-    let sum_current_day = |curr_val: i64, get_val: &dyn Fn(&crate::db::ChartPoint) -> i64| -> f64 {
-        // Sum all context snapshots from the same calendar day as curr_secs
-        let mut total: i64 = context
+    // Get today's running total: MAX of all same-date snapshots including current.
+    let max_current_day = |curr_val: i64, get_val: &dyn Fn(&crate::db::ChartPoint) -> i64| -> f64 {
+        let prior_max: i64 = context
             .iter()
-            .filter(|(s, _)| day_key(*s) == curr_day && *s < curr_secs)
+            .filter(|(s, p)| p.date == curr_date && *s < curr_secs)
             .map(|(_, p)| get_val(p))
-            .sum();
-        total += curr_val;
-        total as f64
+            .max()
+            .unwrap_or(0);
+        curr_val.max(prior_max) as f64
     };
 
-    // Snapshot values are already per-period counts — aggregate to daily totals
-    // and compare today's total against the historical daily distribution.
+    // Compare today's running total against the historical daily distribution.
+    // Uses the same algorithm as anomaly::is_value_anomalous.
     let check_metric = |name: &str,
                         curr_val: i64,
                         get_val: &dyn Fn(&crate::db::ChartPoint) -> i64|
      -> (bool, Option<String>) {
-        let mut daily_values = build_daily_sums(get_val);
+        let mut daily_values = build_daily_maxes(get_val);
         if daily_values.len() < 3 {
             return (false, None);
         }
 
-        let current_daily = sum_current_day(curr_val, get_val);
+        let current_daily = max_current_day(curr_val, get_val);
         let median = crate::anomaly::f64_median_pub(&mut daily_values);
         let mad = crate::anomaly::f64_mad_pub(&mut daily_values, median);
         let effective_mad = crate::anomaly::apply_mad_floor_pub(mad, median, config.mad_floor_pct);
 
         let deviation = current_daily - median;
+        // Apply min_absolute gate (same as notification path)
+        if deviation.abs() < config.min_absolute as f64 {
+            return (false, None);
+        }
         let is_anomalous = if effective_mad == 0.0 {
             deviation.abs() > f64::EPSILON
         } else {

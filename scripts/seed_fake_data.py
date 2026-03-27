@@ -13,8 +13,8 @@ Options:
     --per-day   Number of snapshots per day (required)
     --db        Path to SQLite database (default: ~/.local/share/wishlist-pulse/data.db)
     --app-name  Game name for app_info table (default: "Fake Game <app_id>")
-    --base-adds Starting daily add rate (default: 50)
-    --trend     Daily trend multiplier, e.g. 1.01 = 1% growth/day (default: 1.002)
+    --base-adds Starting daily add rate (default: 15)
+    --trend     Daily trend multiplier, e.g. 1.01 = 1% growth/day (default: 1.001)
     --clear     Remove existing snapshots for this app before seeding
 """
 
@@ -26,12 +26,12 @@ import sqlite3
 import sys
 from datetime import datetime, timedelta
 
-# Top countries by Steam usage with approximate relative weights
+# Western and European countries with approximate relative weights
 COUNTRIES = [
-    ("US", 20), ("CN", 15), ("RU", 10), ("DE", 7), ("BR", 6),
-    ("GB", 5), ("FR", 5), ("CA", 4), ("AU", 3), ("JP", 3),
-    ("KR", 3), ("PL", 3), ("TR", 2), ("IT", 2), ("ES", 2),
-    ("SE", 1), ("NL", 1), ("AR", 1), ("MX", 1), ("IN", 1),
+    ("US", 20), ("DE", 10), ("GB", 8), ("FR", 7), ("CA", 6),
+    ("AU", 5), ("PL", 5), ("IT", 4), ("ES", 4), ("NL", 3),
+    ("SE", 3), ("RO", 3), ("BE", 2), ("AT", 2), ("CZ", 2),
+    ("PT", 2), ("DK", 2), ("NO", 2), ("FI", 2), ("CH", 2),
 ]
 
 
@@ -87,11 +87,11 @@ def _generate_events(days, start):
         if any(abs(d - p) < 20 for p in placed):
             continue
         placed.append(d)
-        # Massive spike: 5-15x the baseline rate
-        events[d] = {"type": "anomaly_spike", "intensity": random.uniform(5.0, 15.0)}
+        # Sharp spike: 3-8x the baseline rate (realistic for a small/medium game)
+        events[d] = {"type": "anomaly_spike", "intensity": random.uniform(3.0, 8.0)}
         # Optional second day at reduced intensity
-        if d + 1 < days and d + 1 not in events and random.random() < 0.5:
-            events[d + 1] = {"type": "anomaly_spike", "intensity": random.uniform(2.0, 5.0)}
+        if d + 1 < days and d + 1 not in events and random.random() < 0.4:
+            events[d + 1] = {"type": "anomaly_spike", "intensity": random.uniform(1.5, 3.0)}
 
     # Guaranteed anomaly drops — sudden near-zero days
     num_drops = max(2, days // 60)
@@ -109,7 +109,7 @@ def _generate_events(days, start):
     for _ in range(num_bumps):
         bump_day = random.randint(0, days - 1)
         if bump_day not in events:
-            events[bump_day] = {"type": "viral", "intensity": random.uniform(1.5, 2.5)}
+            events[bump_day] = {"type": "viral", "intensity": random.uniform(1.3, 2.0)}
 
     # Mild lulls
     num_lulls = max(1, days // 60)
@@ -129,12 +129,6 @@ def generate_snapshots(app_id, days, per_day, base_adds, trend):
     start = now - timedelta(days=days)
     interval = timedelta(hours=24 / per_day)
 
-    # Cumulative counters
-    total_adds = 0
-    total_deletes = 0
-    total_purchases = 0
-    total_gifts = 0
-
     snapshots = []
     total_weight = sum(w for _, w in COUNTRIES)
     ts = start
@@ -146,14 +140,19 @@ def generate_snapshots(app_id, days, per_day, base_adds, trend):
     momentum = 1.0
 
     for day in range(days):
+        # Per-date running totals (reset each day, as Steam reports them)
+        day_adds = 0
+        day_deletes = 0
+        day_purchases = 0
+        day_gifts = 0
         # Daily rate with trend
         day_factor = trend ** day
 
-        # Initial launch hype decay (first ~30 days are boosted then settle)
+        # Initial launch hype decay (modest for a small/medium game)
         if day < 5:
-            launch_factor = 3.0 - (day * 0.3)
+            launch_factor = 2.0 - (day * 0.15)
         elif day < 30:
-            launch_factor = 1.5 * (0.97 ** (day - 5))
+            launch_factor = 1.3 * (0.97 ** (day - 5))
         else:
             launch_factor = 1.0
 
@@ -181,14 +180,14 @@ def generate_snapshots(app_id, days, per_day, base_adds, trend):
         event = events.get(day)
         if event:
             if event["type"] == "sale":
-                event_mult = 1.0 + event["intensity"] * random.uniform(1.5, 2.5)
-                sale_purchase_boost = 2.0 + event["intensity"] * 3.0
-                sale_delete_boost = 1.5 + event["intensity"] * 1.0
+                event_mult = 1.0 + event["intensity"] * random.uniform(1.0, 1.8)
+                sale_purchase_boost = 1.5 + event["intensity"] * 2.0
+                sale_delete_boost = 1.2 + event["intensity"] * 0.6
             elif event["type"] == "anomaly_spike":
                 # Sharp isolated spike — guaranteed to exceed MAD threshold
                 event_mult = event["intensity"]
-                sale_purchase_boost = random.uniform(2.0, 4.0)
-                sale_delete_boost = random.uniform(1.5, 3.0)
+                sale_purchase_boost = random.uniform(1.5, 3.0)
+                sale_delete_boost = random.uniform(1.2, 2.0)
             elif event["type"] == "anomaly_drop":
                 # Sharp isolated drop — near zero activity
                 event_mult = event["intensity"]
@@ -222,10 +221,10 @@ def generate_snapshots(app_id, days, per_day, base_adds, trend):
         # Tight per-day noise — keeps MAD low so anomalies stand out
         daily_adds = combined * random.uniform(0.92, 1.08)
 
-        # Deletes/purchases/gifts with stable ratios
-        delete_rate = random.uniform(0.08, 0.15) * sale_delete_boost
-        purchase_rate = random.uniform(0.03, 0.08) * sale_purchase_boost
-        gift_rate = random.uniform(0.008, 0.02)
+        # Deletes/purchases/gifts — lower conversion for small/medium games
+        delete_rate = random.uniform(0.05, 0.12) * sale_delete_boost
+        purchase_rate = random.uniform(0.02, 0.05) * sale_purchase_boost
+        gift_rate = random.uniform(0.003, 0.01)
 
         daily_deletes = daily_adds * delete_rate
         daily_purchases = daily_adds * purchase_rate
@@ -251,10 +250,10 @@ def generate_snapshots(app_id, days, per_day, base_adds, trend):
             snap_purchases = max(0, int(daily_purchases * frac + random.gauss(0, max(0.3, daily_purchases * frac * 0.2))))
             snap_gifts = max(0, int(daily_gifts * frac + random.gauss(0, 0.3)))
 
-            total_adds += snap_adds
-            total_deletes += snap_deletes
-            total_purchases += snap_purchases
-            total_gifts += snap_gifts
+            day_adds += snap_adds
+            day_deletes += snap_deletes
+            day_purchases += snap_purchases
+            day_gifts += snap_gifts
 
             # Platform split with realistic variance
             win_share = random.gauss(0.85, 0.03)
@@ -299,10 +298,10 @@ def generate_snapshots(app_id, days, per_day, base_adds, trend):
             snapshots.append({
                 "app_id": app_id,
                 "date": date_str,
-                "adds": total_adds,
-                "deletes": total_deletes,
-                "purchases": total_purchases,
-                "gifts": total_gifts,
+                "adds": day_adds,
+                "deletes": day_deletes,
+                "purchases": day_purchases,
+                "gifts": day_gifts,
                 "adds_windows": adds_win,
                 "adds_mac": adds_mac,
                 "adds_linux": adds_linux,
@@ -322,8 +321,8 @@ def main():
     parser.add_argument("--per-day", type=int, required=True, help="Snapshots per day")
     parser.add_argument("--db", type=str, default=None, help="Database path")
     parser.add_argument("--app-name", type=str, default=None, help="Game name")
-    parser.add_argument("--base-adds", type=float, default=50, help="Base daily adds rate")
-    parser.add_argument("--trend", type=float, default=1.002, help="Daily trend multiplier")
+    parser.add_argument("--base-adds", type=float, default=15, help="Base daily adds rate")
+    parser.add_argument("--trend", type=float, default=1.001, help="Daily trend multiplier")
     parser.add_argument("--clear", action="store_true", help="Clear existing data for this app first")
     args = parser.parse_args()
 
@@ -398,7 +397,7 @@ def main():
 
     final = snapshots[-1]
     print(f"\nDone! Inserted {total_snapshots} snapshots.")
-    print(f"  Final cumulative totals:")
+    print(f"  Last day's running totals:")
     print(f"    Adds: {final['adds']:,}")
     print(f"    Deletes: {final['deletes']:,}")
     print(f"    Purchases: {final['purchases']:,}")

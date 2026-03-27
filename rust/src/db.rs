@@ -1073,9 +1073,11 @@ impl Database {
     ) -> AppResult<Vec<SnapshotDelta>> {
         let conn = self.pool.get().await;
         let offset = format!("-{lookback_days} days");
-        let rows: Vec<(i64, i64, i64, i64, String)> = if let Some(cutoff) = exclude_after {
+        // Include `date` so we can skip cross-day pairs. Steam values are per-date
+        // running totals that reset each day, so cross-day deltas are meaningless.
+        let rows: Vec<(i64, i64, i64, i64, String, String)> = if let Some(cutoff) = exclude_after {
             let mut stmt = conn.prepare(
-                "SELECT adds, deletes, purchases, gifts, fetched_at
+                "SELECT adds, deletes, purchases, gifts, fetched_at, date
                  FROM wishlist_snapshots
                  WHERE app_id = ?1 AND fetched_at >= datetime('now', ?2) AND fetched_at <= ?3
                  ORDER BY fetched_at ASC",
@@ -1087,12 +1089,13 @@ impl Database {
                     row.get(2)?,
                     row.get(3)?,
                     row.get(4)?,
+                    row.get(5)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?
         } else {
             let mut stmt = conn.prepare(
-                "SELECT adds, deletes, purchases, gifts, fetched_at
+                "SELECT adds, deletes, purchases, gifts, fetched_at, date
                  FROM wishlist_snapshots
                  WHERE app_id = ?1 AND fetched_at >= datetime('now', ?2)
                  ORDER BY fetched_at ASC",
@@ -1104,6 +1107,7 @@ impl Database {
                     row.get(2)?,
                     row.get(3)?,
                     row.get(4)?,
+                    row.get(5)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?
@@ -1111,11 +1115,16 @@ impl Database {
 
         let mut deltas = Vec::with_capacity(rows.len().saturating_sub(1));
         for pair in rows.windows(2) {
-            let (pa, pd, pp, pg, ref prev_ts) = pair[0];
-            let (ca, cd, cp, cg, ref curr_ts) = pair[1];
+            let (pa, pd, pp, pg, ref prev_ts, ref prev_date) = pair[0];
+            let (ca, cd, cp, cg, ref curr_ts, ref curr_date) = pair[1];
+            // Skip cross-day pairs: Steam values reset each day so the delta
+            // between the last snapshot of day N and first of day N+1 is garbage.
+            if prev_date != curr_date {
+                continue;
+            }
             let days = elapsed_days(prev_ts, curr_ts);
             if days <= 0.0 {
-                continue; // skip zero/negative time gaps (e.g. duplicate timestamps)
+                continue;
             }
             let raw_adds = ca - pa;
             let raw_deletes = cd - pd;
@@ -1141,10 +1150,11 @@ impl Database {
         let conn = self.pool.get().await;
         let offset = format!("-{lookback_days} days");
 
-        // Single query: fetch all country data with timestamps for snapshots in the window.
-        let rows: Vec<(i64, String, String, i64, i64)> = if let Some(cutoff) = exclude_after {
+        // Include ws.date so we can skip cross-day pairs (same reason as get_recent_deltas).
+        let rows: Vec<(i64, String, String, String, i64, i64)> = if let Some(cutoff) = exclude_after
+        {
             let mut stmt = conn.prepare(
-                "SELECT ws.id, ws.fetched_at, sc.country_code, sc.adds, sc.deletes
+                "SELECT ws.id, ws.fetched_at, ws.date, sc.country_code, sc.adds, sc.deletes
                  FROM snapshot_countries sc
                  JOIN wishlist_snapshots ws ON ws.id = sc.snapshot_id
                  WHERE ws.app_id = ?1 AND ws.fetched_at >= datetime('now', ?2) AND ws.fetched_at <= ?3
@@ -1157,12 +1167,13 @@ impl Database {
                     row.get(2)?,
                     row.get(3)?,
                     row.get(4)?,
+                    row.get(5)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?
         } else {
             let mut stmt = conn.prepare(
-                "SELECT ws.id, ws.fetched_at, sc.country_code, sc.adds, sc.deletes
+                "SELECT ws.id, ws.fetched_at, ws.date, sc.country_code, sc.adds, sc.deletes
                  FROM snapshot_countries sc
                  JOIN wishlist_snapshots ws ON ws.id = sc.snapshot_id
                  WHERE ws.app_id = ?1 AND ws.fetched_at >= datetime('now', ?2)
@@ -1175,6 +1186,7 @@ impl Database {
                     row.get(2)?,
                     row.get(3)?,
                     row.get(4)?,
+                    row.get(5)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?
@@ -1183,11 +1195,13 @@ impl Database {
         // Group by snapshot ID, preserving order
         let mut snapshot_ids_ordered: Vec<i64> = Vec::new();
         let mut snapshot_timestamps: HashMap<i64, String> = HashMap::new();
+        let mut snapshot_dates: HashMap<i64, String> = HashMap::new();
         let mut snapshots_countries: HashMap<i64, HashMap<String, (i64, i64)>> = HashMap::new();
-        for (sid, fetched_at, country_code, adds, deletes) in rows {
+        for (sid, fetched_at, date, country_code, adds, deletes) in rows {
             if !snapshots_countries.contains_key(&sid) {
                 snapshot_ids_ordered.push(sid);
                 snapshot_timestamps.insert(sid, fetched_at);
+                snapshot_dates.insert(sid, date);
             }
             snapshots_countries
                 .entry(sid)
@@ -1202,6 +1216,10 @@ impl Database {
         // Compute pairwise deltas per country, normalized by time elapsed
         let mut result: HashMap<String, Vec<CountryDelta>> = HashMap::new();
         for pair in snapshot_ids_ordered.windows(2) {
+            // Skip cross-day pairs (same reason as get_recent_deltas).
+            if snapshot_dates.get(&pair[0]) != snapshot_dates.get(&pair[1]) {
+                continue;
+            }
             let prev_ts = &snapshot_timestamps[&pair[0]];
             let curr_ts = &snapshot_timestamps[&pair[1]];
             let days = elapsed_days(prev_ts, curr_ts);
@@ -1234,6 +1252,86 @@ impl Database {
         Ok(result)
     }
 
+    /// Fetch daily maximum values (one per date) within the lookback window.
+    /// Excludes the given date (typically today) to avoid self-comparison.
+    /// Since Steam values are per-date running totals, MAX per day gives the true daily total.
+    pub async fn get_daily_maxes(
+        &self,
+        app_id: u32,
+        lookback_days: u32,
+        exclude_date: &str,
+    ) -> AppResult<Vec<DailyMax>> {
+        let conn = self.pool.get().await;
+        let offset = format!("-{lookback_days} days");
+        let exclude_date = exclude_date.to_string();
+        let mut stmt = conn.prepare(
+            "SELECT date, MAX(adds), MAX(deletes), MAX(purchases), MAX(gifts)
+             FROM wishlist_snapshots
+             WHERE app_id = ?1 AND date >= date('now', ?2) AND date < ?3
+             GROUP BY date
+             ORDER BY date ASC",
+        )?;
+        let rows = stmt
+            .query_map(rusqlite::params![app_id, offset, exclude_date], |row| {
+                Ok(DailyMax {
+                    date: row.get(0)?,
+                    adds: row.get(1)?,
+                    deletes: row.get(2)?,
+                    purchases: row.get(3)?,
+                    gifts: row.get(4)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Fetch daily maximum country values within the lookback window.
+    /// Returns a HashMap of country_code -> Vec<CountryDailyMax>.
+    pub async fn get_daily_country_maxes(
+        &self,
+        app_id: u32,
+        lookback_days: u32,
+        exclude_date: &str,
+    ) -> AppResult<HashMap<String, Vec<CountryDailyMax>>> {
+        let conn = self.pool.get().await;
+        let offset = format!("-{lookback_days} days");
+        let exclude_date = exclude_date.to_string();
+        let mut stmt = conn.prepare(
+            "SELECT ws.date, sc.country_code, MAX(sc.adds), MAX(sc.deletes)
+             FROM snapshot_countries sc
+             JOIN wishlist_snapshots ws ON ws.id = sc.snapshot_id
+             WHERE ws.app_id = ?1 AND ws.date >= date('now', ?2) AND ws.date < ?3
+             GROUP BY ws.date, sc.country_code
+             ORDER BY ws.date ASC",
+        )?;
+        let rows: Vec<(String, String, i64, i64)> = stmt
+            .query_map(
+                rusqlite::params![app_id, offset, exclude_date],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                },
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut result: HashMap<String, Vec<CountryDailyMax>> = HashMap::new();
+        for (date, country_code, adds, deletes) in rows {
+            result
+                .entry(country_code)
+                .or_default()
+                .push(CountryDailyMax {
+                    date,
+                    adds,
+                    deletes,
+                });
+        }
+        Ok(result)
+    }
+
     /// Get aggregated chart data for a game within a time range.
     /// Resolution determines the GROUP BY: "raw" returns individual snapshots,
     /// "daily" groups by date, "weekly" by ISO week, "monthly" by month.
@@ -1251,7 +1349,8 @@ impl Database {
                 let mut stmt = conn.prepare(
                     "SELECT COALESCE(fetched_at, date) as label,
                             adds, deletes, purchases, gifts,
-                            adds_windows, adds_mac, adds_linux
+                            adds_windows, adds_mac, adds_linux,
+                            date
                      FROM wishlist_snapshots
                      WHERE app_id = ?1 AND fetched_at >= ?2
                      ORDER BY fetched_at ASC",
@@ -1267,6 +1366,7 @@ impl Database {
                             adds_windows: row.get(5)?,
                             adds_mac: row.get(6)?,
                             adds_linux: row.get(7)?,
+                            date: row.get(8)?,
                         })
                     })?
                     .collect::<Result<Vec<_>, _>>()?;
@@ -1276,7 +1376,8 @@ impl Database {
                 let mut stmt = conn.prepare(
                     "SELECT date as label,
                             MAX(adds), MAX(deletes), MAX(purchases), MAX(gifts),
-                            MAX(adds_windows), MAX(adds_mac), MAX(adds_linux)
+                            MAX(adds_windows), MAX(adds_mac), MAX(adds_linux),
+                            date
                      FROM wishlist_snapshots
                      WHERE app_id = ?1 AND fetched_at >= ?2
                      GROUP BY date
@@ -1293,25 +1394,41 @@ impl Database {
                             adds_windows: row.get(5)?,
                             adds_mac: row.get(6)?,
                             adds_linux: row.get(7)?,
+                            date: row.get(8)?,
                         })
                     })?
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(rows)
             }
             "weekly" => {
+                // SUM of daily MAXes gives true weekly totals.
+                // Inner query: MAX per day (since Steam values are running totals).
+                // Outer query: SUM per week.
                 let mut stmt = conn.prepare(
-                    "SELECT strftime('%Y-W%W', fetched_at) as label,
-                            MAX(adds), MAX(deletes), MAX(purchases), MAX(gifts),
-                            MAX(adds_windows), MAX(adds_mac), MAX(adds_linux)
-                     FROM wishlist_snapshots
-                     WHERE app_id = ?1 AND fetched_at >= ?2
-                     GROUP BY strftime('%Y-W%W', fetched_at)
+                    "SELECT strftime('%Y-W%W', date) as label,
+                            SUM(daily_adds), SUM(daily_deletes),
+                            SUM(daily_purchases), SUM(daily_gifts),
+                            SUM(daily_adds_windows), SUM(daily_adds_mac), SUM(daily_adds_linux)
+                     FROM (
+                         SELECT date,
+                                MAX(adds) as daily_adds, MAX(deletes) as daily_deletes,
+                                MAX(purchases) as daily_purchases, MAX(gifts) as daily_gifts,
+                                MAX(adds_windows) as daily_adds_windows,
+                                MAX(adds_mac) as daily_adds_mac,
+                                MAX(adds_linux) as daily_adds_linux
+                         FROM wishlist_snapshots
+                         WHERE app_id = ?1 AND fetched_at >= ?2
+                         GROUP BY date
+                     )
+                     GROUP BY strftime('%Y-W%W', date)
                      ORDER BY label ASC",
                 )?;
                 let rows = stmt
                     .query_map(rusqlite::params![app_id, since], |row| {
+                        let lbl: String = row.get(0)?;
                         Ok(ChartPoint {
-                            label: row.get(0)?,
+                            date: lbl.clone(),
+                            label: lbl,
                             adds: row.get(1)?,
                             deletes: row.get(2)?,
                             purchases: row.get(3)?,
@@ -1325,19 +1442,32 @@ impl Database {
                 Ok(rows)
             }
             "monthly" => {
+                // SUM of daily MAXes gives true monthly totals.
                 let mut stmt = conn.prepare(
-                    "SELECT strftime('%Y-%m', fetched_at) as label,
-                            MAX(adds), MAX(deletes), MAX(purchases), MAX(gifts),
-                            MAX(adds_windows), MAX(adds_mac), MAX(adds_linux)
-                     FROM wishlist_snapshots
-                     WHERE app_id = ?1 AND fetched_at >= ?2
-                     GROUP BY strftime('%Y-%m', fetched_at)
+                    "SELECT strftime('%Y-%m', date) as label,
+                            SUM(daily_adds), SUM(daily_deletes),
+                            SUM(daily_purchases), SUM(daily_gifts),
+                            SUM(daily_adds_windows), SUM(daily_adds_mac), SUM(daily_adds_linux)
+                     FROM (
+                         SELECT date,
+                                MAX(adds) as daily_adds, MAX(deletes) as daily_deletes,
+                                MAX(purchases) as daily_purchases, MAX(gifts) as daily_gifts,
+                                MAX(adds_windows) as daily_adds_windows,
+                                MAX(adds_mac) as daily_adds_mac,
+                                MAX(adds_linux) as daily_adds_linux
+                         FROM wishlist_snapshots
+                         WHERE app_id = ?1 AND fetched_at >= ?2
+                         GROUP BY date
+                     )
+                     GROUP BY strftime('%Y-%m', date)
                      ORDER BY label ASC",
                 )?;
                 let rows = stmt
                     .query_map(rusqlite::params![app_id, since], |row| {
+                        let lbl: String = row.get(0)?;
                         Ok(ChartPoint {
-                            label: row.get(0)?,
+                            date: lbl.clone(),
+                            label: lbl,
                             adds: row.get(1)?,
                             deletes: row.get(2)?,
                             purchases: row.get(3)?,
@@ -1454,7 +1584,8 @@ impl Database {
         let mut stmt = conn.prepare(
             "SELECT COALESCE(fetched_at, date) as label,
                     adds, deletes, purchases, gifts,
-                    adds_windows, adds_mac, adds_linux
+                    adds_windows, adds_mac, adds_linux,
+                    date
              FROM wishlist_snapshots
              WHERE app_id = ?1 AND fetched_at >= ?2 AND fetched_at <= ?3
              ORDER BY fetched_at ASC",
@@ -1470,6 +1601,7 @@ impl Database {
                     adds_windows: row.get(5)?,
                     adds_mac: row.get(6)?,
                     adds_linux: row.get(7)?,
+                    date: row.get(8)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -1573,6 +1705,23 @@ pub struct CountryDelta {
     pub deletes_rate: f64,
 }
 
+/// Daily maximum values for a single day (for anomaly baseline comparison).
+/// Since Steam values are per-date running totals, MAX per day gives the true daily total.
+pub struct DailyMax {
+    pub date: String,
+    pub adds: i64,
+    pub deletes: i64,
+    pub purchases: i64,
+    pub gifts: i64,
+}
+
+/// Daily maximum country values for a single day (for anomaly baseline).
+pub struct CountryDailyMax {
+    pub date: String,
+    pub adds: i64,
+    pub deletes: i64,
+}
+
 /// All-time totals for a single game (summed across all snapshots).
 pub struct GameTotals {
     pub adds: i64,
@@ -1584,6 +1733,9 @@ pub struct GameTotals {
 /// A single aggregated chart data point.
 pub struct ChartPoint {
     pub label: String,
+    /// The Steam reporting date (YYYY-MM-DD). Used for correct day grouping
+    /// in anomaly detection (Steam days reset at midnight Pacific, not UTC).
+    pub date: String,
     pub adds: i64,
     pub deletes: i64,
     pub purchases: i64,

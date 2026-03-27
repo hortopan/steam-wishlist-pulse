@@ -31,17 +31,17 @@
     relaxed: {
       label: "Relaxed",
       description: "Only flags large, obvious spikes. Best for noisy games with frequent wishlist churn.",
-      lookback: 14, up: 3.0, down: 3.0, minAbs: 10, madFloor: 0.10,
+      lookback: 28, up: 3.0, down: 3.0, minAbs: 10, madFloor: 0.10,
     },
     balanced: {
       label: "Balanced",
-      description: "Good default for most games. Catches meaningful changes without too much noise.",
-      lookback: 14, up: 2.0, down: 2.0, minAbs: 5, madFloor: 0.05,
+      description: "Good default for most games. Catches meaningful changes without too much noise. Uses 28-day lookback for weekday/weekend awareness.",
+      lookback: 28, up: 2.0, down: 2.0, minAbs: 5, madFloor: 0.05,
     },
     sensitive: {
       label: "Sensitive",
       description: "Catches smaller changes early. Good for low-traffic games or when you want early warnings.",
-      lookback: 7, up: 1.5, down: 1.5, minAbs: 2, madFloor: 0.02,
+      lookback: 14, up: 1.5, down: 1.5, minAbs: 2, madFloor: 0.02,
     },
     aggressive: {
       label: "Very Sensitive",
@@ -51,7 +51,7 @@
     custom: {
       label: "Custom",
       description: "Manually configure all parameters below.",
-      lookback: 14, up: 2.0, down: 2.0, minAbs: 5, madFloor: 0.05,
+      lookback: 28, up: 2.0, down: 2.0, minAbs: 5, madFloor: 0.05,
     },
   };
 
@@ -124,7 +124,7 @@
       discordAdminIds = data.discord_admin_ids || "";
       discordEnabled = data.discord_enabled || false;
       notificationMode = data.notification_mode || "every_update";
-      anomalyLookbackDays = data.anomaly_lookback_days ?? 14;
+      anomalyLookbackDays = data.anomaly_lookback_days ?? 28;
       anomalySensitivityUp = data.anomaly_sensitivity_up ?? 2.0;
       anomalySensitivityDown = data.anomaly_sensitivity_down ?? 2.0;
       anomalyMinAbsolute = data.anomaly_min_absolute ?? 5;
