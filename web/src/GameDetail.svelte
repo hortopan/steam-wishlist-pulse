@@ -332,9 +332,11 @@
     {/if}
     <!-- Hero Section -->
     <div class="hero">
-      {#if detail.image_url}
-        <img class="hero-image" src={detail.image_url} alt={detail.name} />
-      {/if}
+      <div class="hero-image-wrapper">
+        {#if detail.image_url}
+          <img class="hero-image" src={detail.image_url} alt={detail.name} />
+        {/if}
+      </div>
       <div class="hero-overlay">
         <h1 class="hero-title">{detail.name}</h1>
         <span class="hero-appid">App ID: {detail.app_id}</span>
@@ -716,8 +718,16 @@
     border: 1px solid var(--border);
   }
 
+  .hero-image-wrapper {
+    width: 100%;
+    aspect-ratio: 460 / 215;
+    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+  }
+
   .hero-image {
     width: 100%;
+    height: 100%;
+    object-fit: cover;
     display: block;
   }
 

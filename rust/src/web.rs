@@ -3,6 +3,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
+use chrono::Datelike;
+
 use argon2::password_hash::SaltString;
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use axum::Router;
@@ -267,7 +269,7 @@ impl AppState {
             .ok()
             .flatten()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(14);
+            .unwrap_or(21);
         // Support legacy single "anomaly_sensitivity" key: if up/down are not set,
         // fall back to the legacy key, then to the default.
         let legacy_sensitivity: Option<f64> = self
@@ -277,7 +279,8 @@ impl AppState {
             .ok()
             .flatten()
             .and_then(|v| v.parse().ok());
-        let default_sens = legacy_sensitivity.unwrap_or(2.0);
+        let default_sens_up = legacy_sensitivity.unwrap_or(2.0);
+        let default_sens_down = legacy_sensitivity.unwrap_or(1.8);
         let sensitivity_up = self
             .db
             .get_config(CONFIG_ANOMALY_SENSITIVITY_UP)
@@ -285,7 +288,7 @@ impl AppState {
             .ok()
             .flatten()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(default_sens);
+            .unwrap_or(default_sens_up);
         let sensitivity_down = self
             .db
             .get_config(CONFIG_ANOMALY_SENSITIVITY_DOWN)
@@ -293,7 +296,7 @@ impl AppState {
             .ok()
             .flatten()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(default_sens);
+            .unwrap_or(default_sens_down);
         let min_absolute = self
             .db
             .get_config(CONFIG_ANOMALY_MIN_ABSOLUTE)
@@ -1745,6 +1748,12 @@ fn compute_anomaly_inner(
     // daily count), so MAX gives the true daily total. SUM would be wrong.
     // Uses the `date` field (Steam reporting date) instead of UTC epoch math
     // to avoid mis-bucketing near the Pacific midnight boundary.
+    //
+    // Weekday filtering: prefer same-weekday samples (consistent with notification path).
+    let target_weekday = chrono::NaiveDate::parse_from_str(curr_date, "%Y-%m-%d")
+        .ok()
+        .map(|d| d.weekday());
+
     let build_daily_maxes = |get_val: &dyn Fn(&crate::db::ChartPoint) -> i64| -> Vec<f64> {
         let mut day_map: std::collections::BTreeMap<&str, i64> = std::collections::BTreeMap::new();
         for (_s, p) in &window {
@@ -1758,6 +1767,24 @@ fn compute_anomaly_inner(
                 *entry = val;
             }
         }
+
+        // Apply weekday filtering if we have enough same-weekday samples
+        if let Some(wd) = target_weekday {
+            let same_weekday: Vec<f64> = day_map
+                .iter()
+                .filter(|(date, _)| {
+                    chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
+                        .ok()
+                        .map(|d| d.weekday())
+                        == Some(wd)
+                })
+                .map(|(_, v)| *v as f64)
+                .collect();
+            if same_weekday.len() >= 3 {
+                return same_weekday;
+            }
+        }
+
         day_map.values().map(|v| *v as f64).collect()
     };
 

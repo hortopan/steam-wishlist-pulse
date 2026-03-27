@@ -267,31 +267,30 @@ def generate_snapshots(app_id, days, per_day, base_adds, trend):
             date_str = ts.strftime("%Y-%m-%d")
             fetched_at = ts.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-            # Country breakdown for this snapshot's adds/deletes
+            # Country breakdown using weighted random allocation
+            # This correctly preserves weight proportions even for small counts
             countries = []
-            remaining_adds = snap_adds
-            remaining_deletes = snap_deletes
-            remaining_purchases = snap_purchases
-            remaining_gifts = snap_gifts
+            weights = [w * random.uniform(0.7, 1.3) for _, w in COUNTRIES]
+            weight_total = sum(weights)
+            probs = [w / weight_total for w in weights]
 
-            for i, (code, weight) in enumerate(COUNTRIES):
-                is_last = (i == len(COUNTRIES) - 1)
-                if is_last:
-                    c_adds = remaining_adds
-                    c_deletes = remaining_deletes
-                    c_purchases = remaining_purchases
-                    c_gifts = remaining_gifts
-                else:
-                    share = (weight / total_weight) * random.uniform(0.7, 1.3)
-                    c_adds = min(remaining_adds, max(0, int(snap_adds * share)))
-                    c_deletes = min(remaining_deletes, max(0, int(snap_deletes * share)))
-                    c_purchases = min(remaining_purchases, max(0, int(snap_purchases * share)))
-                    c_gifts = min(remaining_gifts, max(0, int(snap_gifts * share)))
-                    remaining_adds -= c_adds
-                    remaining_deletes -= c_deletes
-                    remaining_purchases -= c_purchases
-                    remaining_gifts -= c_gifts
+            def _allocate(total, probs):
+                """Distribute total across buckets using weighted random selection."""
+                buckets = [0] * len(probs)
+                for _ in range(total):
+                    buckets[random.choices(range(len(probs)), weights=probs, k=1)[0]] += 1
+                return buckets
 
+            alloc_adds = _allocate(snap_adds, probs)
+            alloc_deletes = _allocate(snap_deletes, probs)
+            alloc_purchases = _allocate(snap_purchases, probs)
+            alloc_gifts = _allocate(snap_gifts, probs)
+
+            for i, (code, _) in enumerate(COUNTRIES):
+                c_adds = alloc_adds[i]
+                c_deletes = alloc_deletes[i]
+                c_purchases = alloc_purchases[i]
+                c_gifts = alloc_gifts[i]
                 if c_adds > 0 or c_deletes > 0 or c_purchases > 0 or c_gifts > 0:
                     countries.append((code, c_adds, c_deletes, c_purchases, c_gifts))
 

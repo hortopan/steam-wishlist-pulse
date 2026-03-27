@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
-use chrono::Datelike;
+use chrono::{Datelike, Utc};
+use chrono_tz::US::Pacific;
 
 use crate::db::{DailyMax, Database};
 use crate::steam::WishlistReport;
@@ -96,13 +97,69 @@ pub struct AnomalyConfig {
 impl Default for AnomalyConfig {
     fn default() -> Self {
         Self {
-            lookback_days: 28,
+            lookback_days: 21,
             sensitivity_up: 2.0,
-            sensitivity_down: 2.0,
+            sensitivity_down: 1.8,
             min_absolute: 5,
             mad_floor_pct: 0.05,
         }
     }
+}
+
+/// Fraction of the Steam day (Pacific Time) that has elapsed.
+/// Returns a value in (0.0, 1.0]. Clamps to 1.0 for historical/backfill snapshots
+/// where the fetched_at time is at or past midnight Pacific of the next day.
+fn steam_day_fraction(current_date: &str, fetched_at: Option<&str>) -> f64 {
+    let fetched = match fetched_at {
+        Some(ts) => ts,
+        None => return 1.0, // no timestamp, assume end-of-day
+    };
+
+    // Parse the Steam date to get the day start in Pacific time
+    let naive_date = match chrono::NaiveDate::parse_from_str(current_date, "%Y-%m-%d") {
+        Ok(d) => d,
+        Err(_) => return 1.0,
+    };
+    let day_start = match naive_date
+        .and_hms_opt(0, 0, 0)
+        .and_then(|ndt| ndt.and_local_timezone(Pacific).single())
+    {
+        Some(dt) => dt.with_timezone(&Utc),
+        None => return 1.0,
+    };
+
+    // Parse fetched_at as UTC timestamp
+    let fetched_utc = match chrono::DateTime::parse_from_rfc3339(fetched)
+        .or_else(|_| chrono::DateTime::parse_from_str(fetched, "%Y-%m-%dT%H:%M:%SZ"))
+    {
+        Ok(dt) => dt.with_timezone(&Utc),
+        Err(_) => return 1.0,
+    };
+
+    let elapsed_secs = (fetched_utc - day_start).num_seconds() as f64;
+    let day_secs = 86400.0;
+    let fraction = elapsed_secs / day_secs;
+    fraction.clamp(0.01, 1.0) // floor at 1% to avoid division-by-near-zero
+}
+
+/// Project a partial intra-day running total to an estimated end-of-day value.
+///
+/// When only a fraction of the day has elapsed, the current running total
+/// underestimates the final daily value. This projection compensates for that
+/// bias so we can compare against historical end-of-day baselines.
+///
+/// A minimum day fraction of 25% is required for projection; earlier in the day
+/// the data is too noisy and detection is suppressed (returns None).
+fn project_daily_value(current: f64, day_fraction: f64) -> Option<f64> {
+    if day_fraction >= 0.99 {
+        // End of day or historical data — no projection needed
+        return Some(current);
+    }
+    if day_fraction < 0.25 {
+        // Too early in the day for reliable projection
+        return None;
+    }
+    Some(current / day_fraction)
 }
 
 /// Detect anomalies by comparing today's running totals against historical daily totals.
@@ -129,9 +186,7 @@ pub async fn detect_anomalies(
     {
         Ok(m) => m,
         Err(e) => {
-            tracing::warn!(
-                "Failed to fetch daily maxes for anomaly detection (app {app_id}): {e}"
-            );
+            tracing::warn!("Failed to fetch daily maxes for anomaly detection (app {app_id}): {e}");
             return AnomalyResult {
                 is_anomalous: false,
                 insufficient_data: false,
@@ -157,8 +212,11 @@ pub async fn detect_anomalies(
     // prefer those over the full set to account for weekday/weekend seasonality.
     let daily_maxes = filter_by_weekday(&daily_maxes, &current.date);
 
-    // Today's running totals are the current snapshot values.
-    // These are directly comparable to historical daily maxes.
+    // Compute day fraction for intra-day projection.
+    // Historical baselines use end-of-day MAX values, so we project today's
+    // partial running totals to estimated end-of-day values for fair comparison.
+    let day_fraction = steam_day_fraction(&current.date, current.fetched_at.as_deref());
+
     let fields = [
         (MetricField::Adds, current.adds),
         (MetricField::Deletes, current.deletes),
@@ -178,20 +236,26 @@ pub async fn detect_anomalies(
         let median = f64_median(&mut historical);
         let mad = f64_mad(&mut historical, median);
         let effective_mad = apply_mad_floor(mad, median, config.mad_floor_pct);
-        let (threshold_low, threshold_high) =
-            thresholds_directional(median, effective_mad, config);
+        let (threshold_low, threshold_high) = thresholds_directional(median, effective_mad, config);
 
-        let current_f64 = *today_total as f64;
-        let is_anomalous = is_value_anomalous(current_f64, median, effective_mad, config);
+        let raw_value = *today_total as f64;
+        // Project partial intra-day totals to estimated end-of-day values.
+        // Returns None if too early in the day for reliable detection.
+        let projected = project_daily_value(raw_value, day_fraction);
+        let is_anomalous = match projected {
+            Some(val) => is_value_anomalous(val, median, effective_mad, config),
+            None => false, // too early in the day
+        };
 
         if is_anomalous {
             any_anomalous = true;
         }
 
+        let display_rate = projected.unwrap_or(raw_value);
         metrics.push(MetricAnomaly {
             name: field.name(),
             current_delta: *today_total,
-            current_rate: current_f64,
+            current_rate: display_rate,
             mean: median,
             std_dev: effective_mad,
             threshold_low,
@@ -200,9 +264,12 @@ pub async fn detect_anomalies(
         });
     }
 
-    // Country-level anomaly detection
-    let country_anomalies =
-        detect_country_anomalies(db, app_id, current, config).await;
+    // Country-level anomaly detection (skip if too early in the day)
+    let country_anomalies = if day_fraction < 0.25 {
+        Vec::new()
+    } else {
+        detect_country_anomalies(db, app_id, current, config, day_fraction).await
+    };
     if !country_anomalies.is_empty() {
         any_anomalous = true;
     }
@@ -216,6 +283,10 @@ pub async fn detect_anomalies(
     }
 }
 
+/// Maximum number of country-level anomalies to return.
+/// Prevents noisy notifications for games with global audiences.
+const MAX_COUNTRY_ALERTS: usize = 5;
+
 /// Detect country-level anomalies for adds and deletes by comparing today's
 /// running totals against historical daily maxes per country.
 async fn detect_country_anomalies(
@@ -223,6 +294,7 @@ async fn detect_country_anomalies(
     app_id: u32,
     current: &WishlistReport,
     config: &AnomalyConfig,
+    day_fraction: f64,
 ) -> Vec<CountryAnomaly> {
     let historical = match db
         .get_daily_country_maxes(app_id, config.lookback_days, &current.date)
@@ -250,12 +322,46 @@ async fn detect_country_anomalies(
             continue;
         }
 
+        // Apply weekday filtering (consistent with global metric detection)
+        let filtered: Vec<f64>;
+        let filtered_deletes: Vec<f64>;
+
+        let target_weekday = parse_weekday(&current.date);
+        let same_weekday_indices: Vec<usize> = daily_maxes
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| parse_weekday(&d.date) == target_weekday)
+            .map(|(i, _)| i)
+            .collect();
+
+        let use_weekday = target_weekday.is_some() && same_weekday_indices.len() >= 3;
+
+        if use_weekday {
+            filtered = same_weekday_indices
+                .iter()
+                .map(|&i| daily_maxes[i].adds as f64)
+                .collect();
+            filtered_deletes = same_weekday_indices
+                .iter()
+                .map(|&i| daily_maxes[i].deletes as f64)
+                .collect();
+        } else {
+            filtered = daily_maxes.iter().map(|d| d.adds as f64).collect();
+            filtered_deletes = daily_maxes.iter().map(|d| d.deletes as f64).collect();
+        }
+
         let curr = current_countries.get(country_code.as_str());
         let today_adds = curr.map(|c| c.adds).unwrap_or(0);
         let today_deletes = curr.map(|c| c.deletes).unwrap_or(0);
 
+        // Project intra-day values
+        let projected_adds =
+            project_daily_value(today_adds as f64, day_fraction).unwrap_or(today_adds as f64);
+        let projected_deletes =
+            project_daily_value(today_deletes as f64, day_fraction).unwrap_or(today_deletes as f64);
+
         // Check adds
-        let mut hist_adds: Vec<f64> = daily_maxes.iter().map(|d| d.adds as f64).collect();
+        let mut hist_adds = filtered;
         let adds_median = f64_median(&mut hist_adds);
         let adds_mad = apply_mad_floor(
             f64_mad(&mut hist_adds, adds_median),
@@ -266,21 +372,19 @@ async fn detect_country_anomalies(
         // Scale min_absolute for country-level: use max(global_min, 10% of median)
         // so high-volume countries need proportionally larger deviations to trigger.
         let scaled_min = (config.min_absolute).max((adds_median.abs() * 0.1) as i64);
-        if is_value_anomalous_with_min(today_adds as f64, adds_median, adds_mad, config, scaled_min)
-        {
+        if is_value_anomalous_with_min(projected_adds, adds_median, adds_mad, config, scaled_min) {
             anomalies.push(CountryAnomaly {
                 country_code: country_code.clone(),
                 metric: "adds",
                 current_delta: today_adds,
-                current_rate: today_adds as f64,
+                current_rate: projected_adds,
                 mean: adds_median,
                 std_dev: adds_mad,
             });
         }
 
         // Check deletes
-        let mut hist_deletes: Vec<f64> =
-            daily_maxes.iter().map(|d| d.deletes as f64).collect();
+        let mut hist_deletes = filtered_deletes;
         let deletes_median = f64_median(&mut hist_deletes);
         let deletes_mad = apply_mad_floor(
             f64_mad(&mut hist_deletes, deletes_median),
@@ -288,10 +392,9 @@ async fn detect_country_anomalies(
             config.mad_floor_pct,
         );
 
-        let scaled_min =
-            (config.min_absolute).max((deletes_median.abs() * 0.1) as i64);
+        let scaled_min = (config.min_absolute).max((deletes_median.abs() * 0.1) as i64);
         if is_value_anomalous_with_min(
-            today_deletes as f64,
+            projected_deletes,
             deletes_median,
             deletes_mad,
             config,
@@ -301,7 +404,7 @@ async fn detect_country_anomalies(
                 country_code: country_code.clone(),
                 metric: "deletes",
                 current_delta: today_deletes,
-                current_rate: today_deletes as f64,
+                current_rate: projected_deletes,
                 mean: deletes_median,
                 std_dev: deletes_mad,
             });
@@ -315,6 +418,9 @@ async fn detect_country_anomalies(
             .partial_cmp(&a.current_rate.abs())
             .unwrap_or(std::cmp::Ordering::Equal)
     });
+
+    // Cap to prevent noisy notifications
+    anomalies.truncate(MAX_COUNTRY_ALERTS);
 
     anomalies
 }
@@ -362,6 +468,10 @@ fn is_value_anomalous(value: f64, median: f64, mad: f64, config: &AnomalyConfig)
 
 /// Like `is_value_anomalous` but with a custom `min_absolute` threshold.
 /// Used for country-level detection where the threshold scales with volume.
+///
+/// Expects `mad` to be the effective MAD after `apply_mad_floor()` has been applied.
+/// The MAD floor guarantees mad >= MIN_MAD_FLOOR (2.0), so the mad == 0.0 branch
+/// should be unreachable in normal use.
 fn is_value_anomalous_with_min(
     value: f64,
     median: f64,
@@ -369,6 +479,7 @@ fn is_value_anomalous_with_min(
     config: &AnomalyConfig,
     min_absolute: i64,
 ) -> bool {
+    debug_assert!(mad > 0.0, "expected effective MAD after floor, got 0.0");
     let deviation = value - median;
     if deviation.abs() < min_absolute as f64 {
         return false;
@@ -530,12 +641,16 @@ mod tests {
             min_absolute: 5,
             ..Default::default()
         };
+        // Near-zero baseline: effective MAD after floor = MIN_MAD_FLOOR = 2.0
+        let effective_mad = apply_mad_floor(0.0, 0.0, config.mad_floor_pct);
+        assert_eq!(effective_mad, MIN_MAD_FLOOR);
         // Baseline was zero, small values below min_absolute are not anomalous
-        assert!(!is_value_anomalous(2.0, 0.0, 0.0, &config));
-        assert!(!is_value_anomalous(1.0, 0.0, 0.0, &config));
-        // But values at or above min_absolute ARE anomalous (deviation = value - 0)
-        assert!(is_value_anomalous(5.0, 0.0, 0.0, &config));
-        assert!(is_value_anomalous(10.0, 0.0, 0.0, &config));
+        assert!(!is_value_anomalous(2.0, 0.0, effective_mad, &config));
+        assert!(!is_value_anomalous(1.0, 0.0, effective_mad, &config));
+        // value=5 -> deviation=5, z=5/2=2.5 > 2.0 -> anomalous
+        assert!(is_value_anomalous(5.0, 0.0, effective_mad, &config));
+        // value=10 -> deviation=10, z=10/2=5.0 > 2.0 -> anomalous
+        assert!(is_value_anomalous(10.0, 0.0, effective_mad, &config));
     }
 
     #[test]
@@ -544,10 +659,15 @@ mod tests {
             min_absolute: 1,
             ..Default::default()
         };
-        // History was constant at 0, MAD=0, any non-zero value with enough deviation is anomalous
-        assert!(is_value_anomalous(10.0, 0.0, 0.0, &config));
+        // History was constant at 0: effective MAD = MIN_MAD_FLOOR = 2.0
+        let effective_mad_zero = apply_mad_floor(0.0, 0.0, config.mad_floor_pct);
+        // value=10, median=0, z=10/2=5.0 > 2.0 -> anomalous
+        assert!(is_value_anomalous(10.0, 0.0, effective_mad_zero, &config));
+
+        // History was constant at 10: effective MAD = max(10*0.05=0.5, 2.0) = 2.0
+        let effective_mad_ten = apply_mad_floor(0.0, 10.0, config.mad_floor_pct);
         // Value matches median -> deviation=0, below min_absolute -> not anomalous
-        assert!(!is_value_anomalous(10.0, 10.0, 0.0, &config));
+        assert!(!is_value_anomalous(10.0, 10.0, effective_mad_ten, &config));
     }
 
     #[test]
@@ -636,5 +756,56 @@ mod tests {
         assert!(!is_value_anomalous(103.0, 100.0, effective_mad, &config));
         // value=115 -> deviation=15, z=3.0 -> anomalous
         assert!(is_value_anomalous(115.0, 100.0, effective_mad, &config));
+    }
+
+    #[test]
+    fn test_project_daily_value() {
+        // End of day: no projection needed
+        assert_eq!(project_daily_value(100.0, 1.0), Some(100.0));
+        assert_eq!(project_daily_value(100.0, 0.99), Some(100.0));
+
+        // Half day: project to double
+        let projected = project_daily_value(50.0, 0.5).unwrap();
+        assert!((projected - 100.0).abs() < 1e-10);
+
+        // Quarter day: project to 4x
+        let projected = project_daily_value(25.0, 0.25).unwrap();
+        assert!((projected - 100.0).abs() < 1e-10);
+
+        // Too early: returns None
+        assert_eq!(project_daily_value(10.0, 0.1), None);
+        assert_eq!(project_daily_value(10.0, 0.24), None);
+    }
+
+    #[test]
+    fn test_steam_day_fraction() {
+        // No fetched_at: assume end of day
+        assert_eq!(steam_day_fraction("2025-01-15", None), 1.0);
+
+        // Backfill snapshots (T23:59:59Z) should be ~1.0
+        let frac = steam_day_fraction("2025-01-15", Some("2025-01-16T07:59:59Z"));
+        assert!(frac > 0.99, "backfill should be ~1.0, got {frac}");
+
+        // Unparseable date: fallback to 1.0
+        assert_eq!(
+            steam_day_fraction("bad-date", Some("2025-01-15T12:00:00Z")),
+            1.0
+        );
+
+        // Noon Pacific (20:00 UTC) on a day that starts at 08:00 UTC
+        // Jan 15 midnight Pacific = Jan 15 08:00 UTC (PST = UTC-8)
+        // Noon Pacific = 12hrs elapsed = 50%
+        let frac = steam_day_fraction("2025-01-15", Some("2025-01-15T20:00:00Z"));
+        assert!(
+            (frac - 0.5).abs() < 0.02,
+            "noon Pacific should be ~0.5, got {frac}"
+        );
+
+        // Early morning Pacific (just after midnight) = small fraction
+        let frac = steam_day_fraction("2025-01-15", Some("2025-01-15T10:00:00Z"));
+        assert!(
+            frac < 0.15 && frac > 0.05,
+            "2am Pacific should be small, got {frac}"
+        );
     }
 }

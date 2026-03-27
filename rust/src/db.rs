@@ -1305,17 +1305,14 @@ impl Database {
              ORDER BY ws.date ASC",
         )?;
         let rows: Vec<(String, String, i64, i64)> = stmt
-            .query_map(
-                rusqlite::params![app_id, offset, exclude_date],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, i64>(2)?,
-                        row.get::<_, i64>(3)?,
-                    ))
-                },
-            )?
+            .query_map(rusqlite::params![app_id, offset, exclude_date], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })?
             .collect::<Result<Vec<_>, _>>()?;
 
         let mut result: HashMap<String, Vec<CountryDailyMax>> = HashMap::new();

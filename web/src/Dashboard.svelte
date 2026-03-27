@@ -146,9 +146,15 @@
         onclick={() => onNavigateGame(game.app_id)}
         onkeydown={(e) => handleCardKeydown(e, game.app_id)}
       >
-        {#if game.image_url}
-          <img class="card-image" src={game.image_url} alt={game.name} />
-        {/if}
+        <div class="card-image-wrapper">
+          {#if game.image_url}
+            <img
+              class="card-image"
+              src={game.image_url}
+              alt={game.name}
+            />
+          {/if}
+        </div>
         <div class="card-body">
           <div class="card-header">
             <h2 class="game-name">{game.name}</h2>
@@ -335,11 +341,20 @@
     }
   }
 
+  .card-image-wrapper {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 460 / 215;
+    border-radius: 0.75rem 0.75rem 0 0;
+    overflow: hidden;
+    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+  }
+
   .card-image {
     width: 100%;
-    height: auto;
+    height: 100%;
+    object-fit: cover;
     display: block;
-    border-radius: 0.75rem 0.75rem 0 0;
   }
 
   .card-body {

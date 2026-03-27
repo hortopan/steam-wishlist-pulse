@@ -30,28 +30,28 @@
   const anomalyPresets: Record<string, { label: string; description: string; lookback: number; up: number; down: number; minAbs: number; madFloor: number }> = {
     relaxed: {
       label: "Relaxed",
-      description: "Only flags large, obvious spikes. Best for noisy games with frequent wishlist churn.",
-      lookback: 28, up: 3.0, down: 3.0, minAbs: 10, madFloor: 0.10,
+      description: "Only flags large, obvious spikes or drops. Best for noisy games with frequent wishlist churn.",
+      lookback: 28, up: 3.0, down: 2.5, minAbs: 10, madFloor: 0.10,
     },
     balanced: {
       label: "Balanced",
-      description: "Good default for most games. Catches meaningful changes without too much noise. Uses 28-day lookback for weekday/weekend awareness.",
-      lookback: 28, up: 2.0, down: 2.0, minAbs: 5, madFloor: 0.05,
+      description: "Good default for most games. Catches meaningful changes without too much noise. 21-day lookback enables weekday-aware baselines.",
+      lookback: 21, up: 2.0, down: 1.8, minAbs: 5, madFloor: 0.05,
     },
     sensitive: {
       label: "Sensitive",
       description: "Catches smaller changes early. Good for low-traffic games or when you want early warnings.",
-      lookback: 14, up: 1.5, down: 1.5, minAbs: 2, madFloor: 0.02,
+      lookback: 21, up: 1.5, down: 1.3, minAbs: 2, madFloor: 0.03,
     },
     aggressive: {
       label: "Very Sensitive",
-      description: "Flags nearly any deviation from the baseline. Expect more alerts, best for critical monitoring.",
-      lookback: 7, up: 1.0, down: 1.0, minAbs: 1, madFloor: 0.0,
+      description: "Flags most deviations from the baseline. Expect more alerts, best for critical monitoring.",
+      lookback: 14, up: 1.2, down: 1.0, minAbs: 1, madFloor: 0.02,
     },
     custom: {
       label: "Custom",
       description: "Manually configure all parameters below.",
-      lookback: 28, up: 2.0, down: 2.0, minAbs: 5, madFloor: 0.05,
+      lookback: 21, up: 2.0, down: 1.8, minAbs: 5, madFloor: 0.05,
     },
   };
 
@@ -124,9 +124,9 @@
       discordAdminIds = data.discord_admin_ids || "";
       discordEnabled = data.discord_enabled || false;
       notificationMode = data.notification_mode || "every_update";
-      anomalyLookbackDays = data.anomaly_lookback_days ?? 28;
+      anomalyLookbackDays = data.anomaly_lookback_days ?? 21;
       anomalySensitivityUp = data.anomaly_sensitivity_up ?? 2.0;
-      anomalySensitivityDown = data.anomaly_sensitivity_down ?? 2.0;
+      anomalySensitivityDown = data.anomaly_sensitivity_down ?? 1.8;
       anomalyMinAbsolute = data.anomaly_min_absolute ?? 5;
       anomalyMadFloorPct = data.anomaly_mad_floor_pct ?? 0.05;
       anomalyPreset = detectPreset();

@@ -25,6 +25,10 @@
   // Sync confirmation modal state
   let confirmSync = $state<{ appId: number; name: string } | null>(null);
   let syncRequesting = $state(false);
+
+  // Untrack confirmation modal state
+  let confirmUntrack = $state<{ appId: number; name: string } | null>(null);
+  let untrackRequesting = $state(false);
   // Track app IDs that just had a sync requested — prevents re-triggering before backend reflects cooldown
   let recentlySynced = $state<Set<number>>(new Set());
 
@@ -98,11 +102,22 @@
     }
   }
 
-  async function untrackGame(appId: number, name: string) {
-    if (!confirm(`Stop tracking "${name}"?`)) return;
-    trackingAction = true;
+  function requestUntrack(appId: number, name: string) {
+    confirmUntrack = { appId, name };
+  }
+
+  function cancelUntrack() {
+    if (untrackRequesting) return;
+    confirmUntrack = null;
+  }
+
+  async function confirmAndUntrack() {
+    if (!confirmUntrack) return;
+    const { appId } = confirmUntrack;
+    untrackRequesting = true;
     try {
       const data = await apiPost<{ success: boolean; message?: string; error?: string }>('/admin/untrack', { app_id: appId });
+      confirmUntrack = null;
       if (data.success) {
         showToast('success', data.message!);
         await loadTrackedGames();
@@ -110,10 +125,11 @@
         showToast('error', data.error || 'Failed to untrack game');
       }
     } catch (e: any) {
+      confirmUntrack = null;
       if (e instanceof AuthError) { onLogout(); return; }
       showToast('error', e.message);
     } finally {
-      trackingAction = false;
+      untrackRequesting = false;
     }
   }
 
@@ -171,7 +187,7 @@
   });
 </script>
 
-<svelte:window onkeydown={(e) => { if (e.key === 'Escape' && confirmSync) cancelSync(); }} />
+<svelte:window onkeydown={(e) => { if (e.key === 'Escape') { if (confirmUntrack) cancelUntrack(); else if (confirmSync) cancelSync(); } }} />
 
 <section class="config-section">
   <h2>Track a Game</h2>
@@ -253,7 +269,7 @@
             </button>
             <button
               class="untrack-btn"
-              onclick={() => untrackGame(game.app_id, game.name)}
+              onclick={() => requestUntrack(game.app_id, game.name)}
               disabled={trackingAction}
             >
               Untrack
@@ -277,6 +293,23 @@
         <button class="modal-cancel" onclick={cancelSync} disabled={syncRequesting}>Cancel</button>
         <button class="modal-confirm" onclick={confirmAndSync} disabled={syncRequesting}>
           {syncRequesting ? 'Requesting...' : 'Yes, Sync'}
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+{#if confirmUntrack}
+  <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
+  <div class="modal-overlay" onclick={cancelUntrack} onkeydown={(e) => e.key === 'Escape' && cancelUntrack()}>
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="modal-box" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
+      <h3>Confirm Untrack</h3>
+      <p>Stop tracking <strong>{confirmUntrack.name}</strong>? All collected wishlist data for this game will be deleted.</p>
+      <div class="modal-actions">
+        <button class="modal-cancel" onclick={cancelUntrack} disabled={untrackRequesting}>Cancel</button>
+        <button class="modal-confirm modal-confirm--danger" onclick={confirmAndUntrack} disabled={untrackRequesting}>
+          {untrackRequesting ? 'Removing...' : 'Yes, Untrack'}
         </button>
       </div>
     </div>
@@ -614,5 +647,9 @@
   .modal-confirm:disabled {
     opacity: 0.5;
     cursor: not-allowed;
+  }
+
+  .modal-confirm--danger {
+    background: var(--red, #e74c3c);
   }
 </style>

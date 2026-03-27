@@ -574,7 +574,9 @@ async fn polling_loop(state: AppState, poll_interval_minutes: u64) {
                             // Apply anomaly cooldown: suppress repeated anomaly-only alerts
                             // for the same app+date within a 4-hour window.
                             let anomaly_in_cooldown = if is_real_anomaly {
-                                state.check_anomaly_cooldown(report.app_id, &report.date).await
+                                state
+                                    .check_anomaly_cooldown(report.app_id, &report.date)
+                                    .await
                             } else {
                                 false
                             };
