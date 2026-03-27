@@ -185,10 +185,10 @@ impl AppState {
         const COOLDOWN_HOURS: u64 = 4;
         let mut cooldowns = self.anomaly_cooldowns.lock().await;
         let key = (app_id, date.to_string());
-        if let Some(last_sent) = cooldowns.get(&key) {
-            if last_sent.elapsed() < std::time::Duration::from_secs(COOLDOWN_HOURS * 3600) {
-                return true; // still in cooldown, suppress
-            }
+        if let Some(last_sent) = cooldowns.get(&key)
+            && last_sent.elapsed() < std::time::Duration::from_secs(COOLDOWN_HOURS * 3600)
+        {
+            return true; // still in cooldown, suppress
         }
         cooldowns.insert(key, Instant::now());
         // Clean up old entries (older than 48 hours) to prevent unbounded growth

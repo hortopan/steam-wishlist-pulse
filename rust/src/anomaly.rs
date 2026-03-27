@@ -230,7 +230,7 @@ pub async fn detect_anomalies(
     for (field, today_total) in &fields {
         let mut historical: Vec<f64> = daily_maxes
             .iter()
-            .map(|d| field.extract_daily(*d) as f64)
+            .map(|d| field.extract_daily(d) as f64)
             .collect();
 
         let median = f64_median(&mut historical);
