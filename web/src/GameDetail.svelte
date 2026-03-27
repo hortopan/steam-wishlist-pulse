@@ -13,9 +13,11 @@
     PaginatedHistoryResponse,
     HistoryEntry,
     SnapshotCountriesResponse,
+    AggregatedCountriesResponse,
     SyncStatus,
   } from "./types";
   import Chart from "./Chart.svelte";
+  import CountryPieChart from "./CountryPieChart.svelte";
   import MilestoneCelebration from "./MilestoneCelebration.svelte";
   import SyncProgressBar from "./SyncProgressBar.svelte";
 
@@ -68,6 +70,8 @@
   const HISTORY_PAGE_SIZE = 24;
   let historyLoading = $state(false);
   let chartLoading = $state(false);
+  let countryChartData = $state<AggregatedCountriesResponse | null>(null);
+  let countryChartLoading = $state(false);
 
   // Country lazy-loading
   let expandedCountries = $state<Map<number, CountryEntry[]>>(new Map());
@@ -162,6 +166,7 @@
       chartAbortController = new AbortController();
       await Promise.all([
         fetchChart(chartRange, chartAbortController.signal),
+        fetchCountryChart(chartRange, chartAbortController.signal),
         historyPage === 1 ? fetchHistory(1, signal) : Promise.resolve(),
       ]);
     } catch (e: any) {
@@ -186,6 +191,22 @@
       // Chart errors are non-fatal, keep old data
     } finally {
       chartLoading = false;
+    }
+  }
+
+  async function fetchCountryChart(range: ChartRange, signal?: AbortSignal) {
+    countryChartLoading = true;
+    try {
+      const data = await api<AggregatedCountriesResponse>(
+        `/wishlist/${appId}/countries?range=${range}`, { signal }
+      );
+      if (destroyed) return;
+      if (range === chartRange) countryChartData = data;
+    } catch (e: any) {
+      if (signal?.aborted) return;
+      if (e instanceof AuthError) { onLogout(); return; }
+    } finally {
+      countryChartLoading = false;
     }
   }
 
@@ -257,7 +278,10 @@
     chartRange = range;
     chartAbortController?.abort();
     chartAbortController = new AbortController();
-    await fetchChart(range, chartAbortController.signal);
+    await Promise.all([
+      fetchChart(range, chartAbortController.signal),
+      fetchCountryChart(range, chartAbortController.signal),
+    ]);
   }
 
   onMount(() => {
@@ -445,6 +469,10 @@
     <!-- Chart with range selector -->
     {#if chartData}
       <Chart history={chartData.points} resolution={chartData.resolution} {chartRange} onRangeChange={changeChartRange} ranges={CHART_RANGES} loading={chartLoading} />
+    {/if}
+
+    {#if countryChartData && countryChartData.countries.length > 0}
+      <CountryPieChart countries={countryChartData.countries} loading={countryChartLoading} />
     {/if}
 
     <!-- Top Countries (latest snapshot) -->

@@ -840,6 +840,12 @@ struct SnapshotCountriesResponse {
     countries: Vec<crate::steam::CountryReport>,
 }
 
+/// Aggregated country data across a time range.
+#[derive(Serialize)]
+struct AggregatedCountriesResponse {
+    countries: Vec<crate::steam::CountryReport>,
+}
+
 #[derive(Deserialize)]
 struct AdminConfigUpdate {
     steam_api_key: Option<String>,
@@ -1848,6 +1854,46 @@ async fn api_snapshot_countries(
         countries,
     })
     .into_response()
+}
+
+/// GET /api/wishlist/{app_id}/countries?range=7d
+/// Returns aggregated country data across all snapshots in the given time range.
+async fn api_aggregated_countries(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    axum::extract::Path(app_id): axum::extract::Path<u32>,
+    axum::extract::Query(query): axum::extract::Query<ChartQuery>,
+) -> Response {
+    if state.get_session(&jar).await.is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if !state.db.is_tracked(app_id).await.unwrap_or(false) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    let range = query.range.as_deref().unwrap_or("7d");
+    let now = chrono::Utc::now();
+    let since = match range {
+        "1d" => now - chrono::TimeDelta::days(1),
+        "2d" => now - chrono::TimeDelta::days(2),
+        "3d" => now - chrono::TimeDelta::days(3),
+        "7d" => now - chrono::TimeDelta::days(7),
+        "1m" => now - chrono::TimeDelta::days(30),
+        "3m" => now - chrono::TimeDelta::days(90),
+        "1y" => now - chrono::TimeDelta::days(365),
+        "5y" => now - chrono::TimeDelta::days(5 * 365),
+        "all" => now - chrono::TimeDelta::days(20 * 365),
+        _ => now - chrono::TimeDelta::days(7),
+    };
+    let since_str = since.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+
+    let countries = state
+        .db
+        .get_aggregated_countries(app_id, &since_str)
+        .await
+        .unwrap_or_default();
+
+    Json(AggregatedCountriesResponse { countries }).into_response()
 }
 
 async fn api_admin_config_get(State(state): State<AppState>, jar: CookieJar) -> Response {
@@ -3013,6 +3059,10 @@ pub async fn run_web(bind_addr: String, state: AppState) {
         .route(
             "/api/wishlist/{app_id}/countries/{snapshot_id}",
             get(api_snapshot_countries),
+        )
+        .route(
+            "/api/wishlist/{app_id}/countries",
+            get(api_aggregated_countries),
         )
         // Admin routes
         .route("/api/admin/config", get(api_admin_config_get))

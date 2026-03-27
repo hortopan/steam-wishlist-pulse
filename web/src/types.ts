@@ -89,6 +89,10 @@ export interface SnapshotCountriesResponse {
   countries: CountryEntry[];
 }
 
+export interface AggregatedCountriesResponse {
+  countries: CountryEntry[];
+}
+
 export interface TrackedGame {
   app_id: number;
   name: string;

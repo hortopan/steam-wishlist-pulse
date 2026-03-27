@@ -1354,6 +1354,40 @@ impl Database {
         }
     }
 
+    /// Get aggregated country data for a game within a time range.
+    /// Sums adds/deletes/purchases/gifts across all snapshots in the window,
+    /// grouped by country_code, ordered by total adds descending.
+    pub async fn get_aggregated_countries(
+        &self,
+        app_id: u32,
+        since: &str,
+    ) -> AppResult<Vec<crate::steam::CountryReport>> {
+        let conn = self.pool.get().await;
+        let since = since.to_string();
+
+        let mut stmt = conn.prepare(
+            "SELECT sc.country_code,
+                    SUM(sc.adds), SUM(sc.deletes), SUM(sc.purchases), SUM(sc.gifts)
+             FROM snapshot_countries sc
+             INNER JOIN wishlist_snapshots ws ON ws.id = sc.snapshot_id
+             WHERE ws.app_id = ?1 AND ws.fetched_at >= ?2
+             GROUP BY sc.country_code
+             ORDER BY SUM(sc.adds) DESC",
+        )?;
+        let rows = stmt
+            .query_map(rusqlite::params![app_id, since], |row| {
+                Ok(crate::steam::CountryReport {
+                    country_code: row.get(0)?,
+                    adds: row.get(1)?,
+                    deletes: row.get(2)?,
+                    purchases: row.get(3)?,
+                    gifts: row.get(4)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     /// Get paginated snapshots for a game (newest first), without country data.
     /// Returns (snapshot_id, report) pairs and the total count.
     pub async fn get_snapshots_paginated(
