@@ -236,6 +236,10 @@ pub async fn backfill_game_history(
 ) {
     use chrono::NaiveDate;
 
+    // Force-replace existing snapshots during full re-syncs so stale
+    // real-time polling data doesn't survive the resync.
+    let force = sync_type == "full";
+
     // 1. Get app_min_date (from DB cache or by fetching current data)
     //    For full re-syncs, always re-fetch from Steam to discover any newly
     //    available historical data that wasn't there on the first sync.
@@ -374,7 +378,7 @@ pub async fn backfill_game_history(
                 let fetched_at = format!("{date_str}T23:59:59Z");
                 if let Err(e) = state
                     .db
-                    .insert_backfill_snapshot(&report, &fetched_at)
+                    .insert_backfill_snapshot(&report, &fetched_at, force)
                     .await
                 {
                     tracing::error!("Failed to store backfill for app {app_id} on {date_str}: {e}");
@@ -427,7 +431,7 @@ pub async fn backfill_game_history(
                                 let fetched_at = format!("{date_str}T23:59:59Z");
                                 let _ = state
                                     .db
-                                    .insert_backfill_snapshot(&report, &fetched_at)
+                                    .insert_backfill_snapshot(&report, &fetched_at, force)
                                     .await;
                                 let _ = state.db.mark_date_crawled(app_id, date_str).await;
                                 let _ = state.db.clear_failed_date(app_id, date_str).await;
@@ -467,11 +471,118 @@ pub async fn backfill_game_history(
     state.finish_backfill(app_id).await;
 }
 
+/// Daily verification: re-fetch the last 3 completed days from Steam and correct
+/// any snapshots where our stored MAX aggregates differ from Steam's authoritative data.
+/// Protects against Steam API failures by refusing to replace non-zero data with all-zeros.
+async fn verify_recent_data(state: &AppState, steam: &SteamClient, app_ids: &[u32]) {
+    let today = Utc::now().with_timezone(&Pacific).date_naive();
+
+    for days_ago in 1..=3i64 {
+        let date = (today - chrono::TimeDelta::days(days_ago))
+            .format("%Y-%m-%d")
+            .to_string();
+
+        for &app_id in app_ids {
+            // Fetch authoritative data from Steam
+            let report = match steam.fetch_wishlist_for_backfill(app_id, &date).await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::debug!(
+                        "Verification: skipping app {app_id} on {date} — fetch error: {e}"
+                    );
+                    continue;
+                }
+            };
+
+            // Load our current MAX aggregates for this date
+            let local = match state.db.get_daily_max_for_date(app_id, &date).await {
+                Ok(Some(m)) => m,
+                Ok(None) => {
+                    // We have no data for this date — adopt Steam's if non-zero
+                    if report.adds != 0
+                        || report.deletes != 0
+                        || report.purchases != 0
+                        || report.gifts != 0
+                    {
+                        tracing::info!(
+                            "Verification: filling missing data for app {app_id} on {date} \
+                             (adds={}, deletes={}, purchases={}, gifts={})",
+                            report.adds,
+                            report.deletes,
+                            report.purchases,
+                            report.gifts,
+                        );
+                        if let Err(e) = state.db.replace_snapshots_for_date(&report).await {
+                            tracing::error!(
+                                "Verification: failed to insert data for app {app_id} on {date}: {e}"
+                            );
+                        }
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "Verification: failed to read local data for app {app_id} on {date}: {e}"
+                    );
+                    continue;
+                }
+            };
+
+            // Don't replace non-zero local data with all-zeros from Steam (API failure protection)
+            let steam_all_zero = report.adds == 0
+                && report.deletes == 0
+                && report.purchases == 0
+                && report.gifts == 0;
+            let local_has_data =
+                local.adds != 0 || local.deletes != 0 || local.purchases != 0 || local.gifts != 0;
+
+            if steam_all_zero && local_has_data {
+                tracing::debug!(
+                    "Verification: skipping app {app_id} on {date} — Steam returned all zeros but we have data"
+                );
+                continue;
+            }
+
+            // Check if values already match
+            if local.adds == report.adds
+                && local.deletes == report.deletes
+                && local.purchases == report.purchases
+                && local.gifts == report.gifts
+            {
+                continue;
+            }
+
+            // Data differs — replace with Steam's authoritative values
+            tracing::info!(
+                "Verification: correcting app {app_id} on {date} — \
+                 local(adds={}, del={}, pur={}, gifts={}) → \
+                 steam(adds={}, del={}, pur={}, gifts={})",
+                local.adds,
+                local.deletes,
+                local.purchases,
+                local.gifts,
+                report.adds,
+                report.deletes,
+                report.purchases,
+                report.gifts,
+            );
+            if let Err(e) = state.db.replace_snapshots_for_date(&report).await {
+                tracing::error!("Verification: failed to correct app {app_id} on {date}: {e}");
+            }
+        }
+    }
+}
+
 async fn polling_loop(state: AppState, poll_interval_minutes: u64) {
     use std::time::Duration;
     use tokio::time;
 
     let mut interval = time::interval(Duration::from_secs(poll_interval_minutes * 60));
+    // Daily data verification state: track which Pacific date we last verified and
+    // how many successful polls have happened since the day changed.  We wait for
+    // the second poll of a new day so that the first poll confirms Steam is healthy.
+    let mut last_verification_date: Option<String> = None;
+    let mut polls_since_new_day: u32 = 0;
 
     loop {
         interval.tick().await;
@@ -498,6 +609,26 @@ async fn polling_loop(state: AppState, poll_interval_minutes: u64) {
         if app_ids.is_empty() {
             tracing::info!("No games tracked, skipping poll.");
             continue;
+        }
+
+        // Daily data verification: on the second successful poll of each new
+        // Pacific day, check the last 3 completed days against Steam and correct
+        // any mismatches.  Waiting for the second poll ensures Steam API is
+        // healthy before we trust its responses for corrections.
+        let today_pacific = Utc::now()
+            .with_timezone(&Pacific)
+            .date_naive()
+            .format("%Y-%m-%d")
+            .to_string();
+        if last_verification_date.as_deref() != Some(&today_pacific) {
+            polls_since_new_day += 1;
+            if polls_since_new_day >= 2 {
+                tracing::info!("Running daily data verification for last 3 days...");
+                verify_recent_data(&state, &steam, &app_ids).await;
+                last_verification_date = Some(today_pacific);
+                polls_since_new_day = 0;
+                tracing::info!("Daily data verification complete.");
+            }
         }
 
         // Refresh app info (names & images) for all tracked games

@@ -24,6 +24,7 @@ export interface GameReport {
   total_deletes: number;
   total_purchases: number;
   total_gifts: number;
+  current_wishlists: number;
 }
 
 export interface AnomalyMetrics {

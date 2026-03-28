@@ -554,6 +554,7 @@ impl Database {
         &self,
         report: &WishlistReport,
         fetched_at: &str,
+        force: bool,
     ) -> AppResult<()> {
         let conn = self.pool.get().await;
 
@@ -562,75 +563,88 @@ impl Database {
         conn.execute_batch("BEGIN IMMEDIATE")?;
 
         let result = (|| -> AppResult<()> {
-            // Check if a snapshot already exists for this date.
-            // If a backfill snapshot exists (fetched_at ends with T23:59:59Z),
-            // update it in-place so data stays visible during re-syncs.
-            // If a real-time snapshot exists, skip — don't overwrite live data.
-            let existing: Option<(i64, String)> = conn
-                .prepare(
-                    "SELECT id, fetched_at FROM wishlist_snapshots WHERE app_id = ?1 AND date = ?2",
-                )?
-                .query_row(rusqlite::params![report.app_id, report.date], |row| {
-                    Ok((row.get(0)?, row.get(1)?))
-                })
-                .optional()?;
+            if force {
+                // Full resync: delete all existing snapshots for this date so we
+                // start fresh.  This fixes stale real-time polling snapshots that
+                // would otherwise be silently skipped.  Country data is cascade-
+                // deleted via the snapshot_countries FK.
+                conn.execute(
+                    "DELETE FROM wishlist_snapshots WHERE app_id = ?1 AND date = ?2",
+                    rusqlite::params![report.app_id, report.date],
+                )?;
+            } else {
+                // Initial backfill: check if a snapshot already exists for this date.
+                // If a backfill snapshot exists (fetched_at ends with T23:59:59Z),
+                // update it in-place so data stays visible during re-syncs.
+                // If a real-time snapshot exists, skip — don't overwrite live data.
+                let existing: Option<(i64, String)> = conn
+                    .prepare(
+                        "SELECT id, fetched_at FROM wishlist_snapshots WHERE app_id = ?1 AND date = ?2",
+                    )?
+                    .query_row(rusqlite::params![report.app_id, report.date], |row| {
+                        Ok((row.get(0)?, row.get(1)?))
+                    })
+                    .optional()?;
 
-            match existing {
-                Some((snapshot_id, existing_fetched_at))
-                    if existing_fetched_at.ends_with("T23:59:59Z") =>
-                {
-                    // Update the existing backfill snapshot in-place
-                    conn.execute(
-                        "UPDATE wishlist_snapshots
-                            SET adds = ?1, deletes = ?2, purchases = ?3, gifts = ?4,
-                                adds_windows = ?5, adds_mac = ?6, adds_linux = ?7,
-                                fetched_at = ?8
-                          WHERE id = ?9",
-                        rusqlite::params![
-                            report.adds,
-                            report.deletes,
-                            report.purchases,
-                            report.gifts,
-                            report.adds_windows,
-                            report.adds_mac,
-                            report.adds_linux,
-                            fetched_at,
-                            snapshot_id,
-                        ],
-                    )?;
-                    // Replace country data for this snapshot
-                    conn.execute(
-                        "DELETE FROM snapshot_countries WHERE snapshot_id = ?1",
-                        [snapshot_id],
-                    )?;
-                    Self::save_countries(&conn, snapshot_id, &report.countries)?;
-                }
-                Some(_) => {
-                    // Real-time snapshot exists — don't overwrite
-                    return Ok(());
-                }
-                None => {
-                    // No snapshot for this date — insert new
-                    conn.execute(
-                        "INSERT INTO wishlist_snapshots (app_id, date, adds, deletes, purchases, gifts, adds_windows, adds_mac, adds_linux, fetched_at)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                        rusqlite::params![
-                            report.app_id,
-                            report.date,
-                            report.adds,
-                            report.deletes,
-                            report.purchases,
-                            report.gifts,
-                            report.adds_windows,
-                            report.adds_mac,
-                            report.adds_linux,
-                            fetched_at,
-                        ],
-                    )?;
-                    let snapshot_id = conn.last_insert_rowid();
-                    Self::save_countries(&conn, snapshot_id, &report.countries)?;
+                match existing {
+                    Some((snapshot_id, existing_fetched_at))
+                        if existing_fetched_at.ends_with("T23:59:59Z") =>
+                    {
+                        // Update the existing backfill snapshot in-place
+                        conn.execute(
+                            "UPDATE wishlist_snapshots
+                                SET adds = ?1, deletes = ?2, purchases = ?3, gifts = ?4,
+                                    adds_windows = ?5, adds_mac = ?6, adds_linux = ?7,
+                                    fetched_at = ?8
+                              WHERE id = ?9",
+                            rusqlite::params![
+                                report.adds,
+                                report.deletes,
+                                report.purchases,
+                                report.gifts,
+                                report.adds_windows,
+                                report.adds_mac,
+                                report.adds_linux,
+                                fetched_at,
+                                snapshot_id,
+                            ],
+                        )?;
+                        // Replace country data for this snapshot
+                        conn.execute(
+                            "DELETE FROM snapshot_countries WHERE snapshot_id = ?1",
+                            [snapshot_id],
+                        )?;
+                        Self::save_countries(&conn, snapshot_id, &report.countries)?;
+                        return Ok(());
+                    }
+                    Some(_) => {
+                        // Real-time snapshot exists — don't overwrite
+                        return Ok(());
+                    }
+                    None => { /* fall through to insert below */ }
                 }
             }
+
+            // Insert fresh snapshot (used by both force=true after delete, and
+            // force=false when no existing snapshot was found).
+            conn.execute(
+                "INSERT INTO wishlist_snapshots (app_id, date, adds, deletes, purchases, gifts, adds_windows, adds_mac, adds_linux, fetched_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                rusqlite::params![
+                    report.app_id,
+                    report.date,
+                    report.adds,
+                    report.deletes,
+                    report.purchases,
+                    report.gifts,
+                    report.adds_windows,
+                    report.adds_mac,
+                    report.adds_linux,
+                    fetched_at,
+                ],
+            )?;
+            let snapshot_id = conn.last_insert_rowid();
+            Self::save_countries(&conn, snapshot_id, &report.countries)?;
             Ok(())
         })();
 
@@ -1283,6 +1297,73 @@ impl Database {
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    /// Get MAX aggregates for a single date (for data verification).
+    pub async fn get_daily_max_for_date(
+        &self,
+        app_id: u32,
+        date: &str,
+    ) -> AppResult<Option<DailyMax>> {
+        let conn = self.pool.get().await;
+        let result = conn
+            .prepare(
+                "SELECT date, MAX(adds), MAX(deletes), MAX(purchases), MAX(gifts)
+                 FROM wishlist_snapshots
+                 WHERE app_id = ?1 AND date = ?2
+                 GROUP BY date",
+            )?
+            .query_row(rusqlite::params![app_id, date], |row| {
+                Ok(DailyMax {
+                    date: row.get(0)?,
+                    adds: row.get(1)?,
+                    deletes: row.get(2)?,
+                    purchases: row.get(3)?,
+                    gifts: row.get(4)?,
+                })
+            })
+            .optional()?;
+        Ok(result)
+    }
+
+    /// Atomically replace all snapshots for a (app_id, date) with a single
+    /// authoritative snapshot.  Country data is cascade-deleted via FK.
+    pub async fn replace_snapshots_for_date(&self, report: &WishlistReport) -> AppResult<()> {
+        let conn = self.pool.get().await;
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| -> AppResult<()> {
+            conn.execute(
+                "DELETE FROM wishlist_snapshots WHERE app_id = ?1 AND date = ?2",
+                rusqlite::params![report.app_id, report.date],
+            )?;
+            let fetched_at = format!("{}T23:59:59Z", report.date);
+            conn.execute(
+                "INSERT INTO wishlist_snapshots (app_id, date, adds, deletes, purchases, gifts, adds_windows, adds_mac, adds_linux, fetched_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                rusqlite::params![
+                    report.app_id,
+                    report.date,
+                    report.adds,
+                    report.deletes,
+                    report.purchases,
+                    report.gifts,
+                    report.adds_windows,
+                    report.adds_mac,
+                    report.adds_linux,
+                    fetched_at,
+                ],
+            )?;
+            let snapshot_id = conn.last_insert_rowid();
+            Self::save_countries(&conn, snapshot_id, &report.countries)?;
+            Ok(())
+        })();
+        match &result {
+            Ok(_) => conn.execute_batch("COMMIT")?,
+            Err(_) => {
+                let _ = conn.execute_batch("ROLLBACK");
+            }
+        }
+        result
     }
 
     /// Fetch daily maximum country values within the lookback window.

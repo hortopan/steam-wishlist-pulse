@@ -7,7 +7,7 @@
 
   let netWishlists = $derived(
     detail.latest
-      ? detail.latest.total_adds - detail.latest.total_deletes - detail.latest.total_purchases - detail.latest.total_gifts
+      ? detail.latest.current_wishlists
       : 0
   );
 

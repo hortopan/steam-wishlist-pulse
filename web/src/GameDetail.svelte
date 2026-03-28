@@ -451,7 +451,7 @@
       {/if}
 
       <!-- Net Change -->
-      {@const net = detail.latest.adds - detail.latest.deletes}
+      {@const net = detail.latest.adds - detail.latest.deletes - detail.latest.purchases - detail.latest.gifts}
       <div class="net-row" class:flash-net={flashMetrics.size > 0}>
         <span class="net-label">Net Wishlist Change Today</span>
         <span

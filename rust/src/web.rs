@@ -780,6 +780,7 @@ struct GameReport {
     total_deletes: i64,
     total_purchases: i64,
     total_gifts: i64,
+    current_wishlists: i64,
 }
 
 #[derive(Serialize)]
@@ -1278,6 +1279,8 @@ async fn api_wishlist(State(state): State<AppState>, jar: CookieJar) -> Response
                 total_deletes: game_totals.map_or(0, |t| t.deletes),
                 total_purchases: game_totals.map_or(0, |t| t.purchases),
                 total_gifts: game_totals.map_or(0, |t| t.gifts),
+                current_wishlists: game_totals
+                    .map_or(0, |t| t.adds - t.deletes - t.purchases - t.gifts),
             }
         })
         .collect();
@@ -1334,6 +1337,9 @@ async fn api_game_detail(
                 total_deletes: game_totals.as_ref().map_or(0, |t| t.deletes),
                 total_purchases: game_totals.as_ref().map_or(0, |t| t.purchases),
                 total_gifts: game_totals.as_ref().map_or(0, |t| t.gifts),
+                current_wishlists: game_totals
+                    .as_ref()
+                    .map_or(0, |t| t.adds - t.deletes - t.purchases - t.gifts),
             }
         });
 

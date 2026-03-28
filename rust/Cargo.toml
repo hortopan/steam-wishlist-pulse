@@ -1,6 +1,6 @@
 [package]
 name = "wishlist-pulse"
-version = "0.1.9"
+version = "0.1.10"
 edition = "2024"
 repository = "https://github.com/hortopan/steam-wishlist-pulse"
 description = "Steam Wishlist monitoring bot with web dashboard, Telegram and Discord notifications"

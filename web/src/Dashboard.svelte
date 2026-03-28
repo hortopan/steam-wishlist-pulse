@@ -179,13 +179,13 @@
           {/if}
           <div
             class="stat-net"
-            class:positive={game.total_adds - game.total_deletes > 0}
-            class:negative={game.total_adds - game.total_deletes < 0}
+            class:positive={game.current_wishlists > 0}
+            class:negative={game.current_wishlists < 0}
           >
             <span class="net-value"
-              >{(game.total_adds - game.total_deletes).toLocaleString()}</span
+              >{game.current_wishlists.toLocaleString()}</span
             >
-            <span class="net-label">Net Wishlists (Lifetime)</span>
+            <span class="net-label">Current Wishlists</span>
           </div>
           <div class="stats-section-label">Lifetime</div>
           <div class="stats">
