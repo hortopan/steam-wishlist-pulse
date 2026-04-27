@@ -2652,7 +2652,21 @@ async fn api_admin_track_game(
                         let _ = state.db.insert_snapshot_if_changed(&report).await;
                     }
                     Err(e) => {
+                        // Today's summary may not be ready yet — still try to
+                        // cache app_min_date so the backfill below has a date
+                        // range to work with.
                         tracing::warn!("Failed to fetch initial data for {app_id}: {e}");
+                        match steam.fetch_app_min_date(app_id).await {
+                            Ok(Some(min_date)) => {
+                                let _ = state.db.store_app_min_date(app_id, &min_date).await;
+                            }
+                            Ok(None) => {}
+                            Err(e2) => {
+                                tracing::warn!(
+                                    "Failed to discover app_min_date for {app_id}: {e2}"
+                                );
+                            }
+                        }
                     }
                 }
 

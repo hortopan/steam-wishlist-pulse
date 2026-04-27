@@ -243,6 +243,40 @@ impl SteamClient {
         self.fetch_wishlist_for_date(app_id, &date).await
     }
 
+    /// Fetch only the `app_min_date` for an app. Unlike `fetch_wishlist`, this
+    /// succeeds even when Steam has no aggregated summary for the queried date
+    /// (e.g. today's data isn't ready yet) — the API still returns
+    /// `app_min_date` in that case, which is all we need to seed a backfill.
+    pub async fn fetch_app_min_date(&self, app_id: u32) -> AppResult<Option<String>> {
+        let now = Utc::now().with_timezone(&Pacific);
+        let date = now.format("%Y-%m-%d").to_string();
+        self.rate_limiter.lock().await.acquire().await;
+
+        let api_key = self.api_key.read().await.clone();
+        let resp = self
+            .http
+            .get(WISHLIST_API_URL)
+            .query(&[
+                ("key", api_key.as_str()),
+                ("appid", &app_id.to_string()),
+                ("date", &date),
+            ])
+            .send()
+            .await?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(AppError::other(format!(
+                "Steam API returned {status} for app {app_id}: {body}"
+            )));
+        }
+
+        let body = resp.text().await?;
+        let data: WishlistApiResponse = serde_json::from_str(&body)?;
+        Ok(data.response.and_then(|r| r.app_min_date))
+    }
+
     pub async fn fetch_wishlist_for_date(
         &self,
         app_id: u32,

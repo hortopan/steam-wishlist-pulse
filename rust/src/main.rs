@@ -251,17 +251,18 @@ pub async fn backfill_game_history(
     let min_date_str = match cached_min_date {
         Some(d) => d,
         _ => {
-            // Not cached yet — fetch current data to discover it
-            match steam.fetch_wishlist(app_id).await {
-                Ok(report) => {
-                    if let Some(ref d) = report.app_min_date {
-                        let _ = state.db.store_app_min_date(app_id, d).await;
-                        d.clone()
-                    } else {
-                        tracing::debug!("No app_min_date for app {app_id}, skipping backfill");
-                        state.cancel_backfill_token(app_id).await;
-                        return;
-                    }
+            // Not cached yet — ask Steam for the app's min_date. This call
+            // succeeds even when today's summary isn't ready yet, since the
+            // API still returns `app_min_date` in that case.
+            match steam.fetch_app_min_date(app_id).await {
+                Ok(Some(d)) => {
+                    let _ = state.db.store_app_min_date(app_id, &d).await;
+                    d
+                }
+                Ok(None) => {
+                    tracing::debug!("No app_min_date for app {app_id}, skipping backfill");
+                    state.cancel_backfill_token(app_id).await;
+                    return;
                 }
                 Err(e) => {
                     tracing::warn!(
