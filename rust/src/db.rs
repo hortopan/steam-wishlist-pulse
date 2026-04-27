@@ -1417,10 +1417,11 @@ impl Database {
         &self,
         app_id: u32,
         since: &str,
+        until: &str,
         resolution: &str,
     ) -> AppResult<Vec<ChartPoint>> {
         let conn = self.pool.get().await;
-        let since = since.to_string();
+        let params = rusqlite::params![app_id, since, until];
 
         match resolution {
             "raw" => {
@@ -1430,11 +1431,11 @@ impl Database {
                             adds_windows, adds_mac, adds_linux,
                             date
                      FROM wishlist_snapshots
-                     WHERE app_id = ?1 AND fetched_at >= ?2
+                     WHERE app_id = ?1 AND fetched_at >= ?2 AND fetched_at <= ?3
                      ORDER BY fetched_at ASC",
                 )?;
                 let rows = stmt
-                    .query_map(rusqlite::params![app_id, since], |row| {
+                    .query_map(params, |row| {
                         Ok(ChartPoint {
                             label: row.get(0)?,
                             adds: row.get(1)?,
@@ -1457,12 +1458,12 @@ impl Database {
                             MAX(adds_windows), MAX(adds_mac), MAX(adds_linux),
                             date
                      FROM wishlist_snapshots
-                     WHERE app_id = ?1 AND fetched_at >= ?2
+                     WHERE app_id = ?1 AND fetched_at >= ?2 AND fetched_at <= ?3
                      GROUP BY date
                      ORDER BY date ASC",
                 )?;
                 let rows = stmt
-                    .query_map(rusqlite::params![app_id, since], |row| {
+                    .query_map(params, |row| {
                         Ok(ChartPoint {
                             label: row.get(0)?,
                             adds: row.get(1)?,
@@ -1495,14 +1496,14 @@ impl Database {
                                 MAX(adds_mac) as daily_adds_mac,
                                 MAX(adds_linux) as daily_adds_linux
                          FROM wishlist_snapshots
-                         WHERE app_id = ?1 AND fetched_at >= ?2
+                         WHERE app_id = ?1 AND fetched_at >= ?2 AND fetched_at <= ?3
                          GROUP BY date
                      )
                      GROUP BY strftime('%Y-W%W', date)
                      ORDER BY label ASC",
                 )?;
                 let rows = stmt
-                    .query_map(rusqlite::params![app_id, since], |row| {
+                    .query_map(params, |row| {
                         let lbl: String = row.get(0)?;
                         Ok(ChartPoint {
                             date: lbl.clone(),
@@ -1534,14 +1535,14 @@ impl Database {
                                 MAX(adds_mac) as daily_adds_mac,
                                 MAX(adds_linux) as daily_adds_linux
                          FROM wishlist_snapshots
-                         WHERE app_id = ?1 AND fetched_at >= ?2
+                         WHERE app_id = ?1 AND fetched_at >= ?2 AND fetched_at <= ?3
                          GROUP BY date
                      )
                      GROUP BY strftime('%Y-%m', date)
                      ORDER BY label ASC",
                 )?;
                 let rows = stmt
-                    .query_map(rusqlite::params![app_id, since], |row| {
+                    .query_map(params, |row| {
                         let lbl: String = row.get(0)?;
                         Ok(ChartPoint {
                             date: lbl.clone(),
@@ -1569,21 +1570,21 @@ impl Database {
         &self,
         app_id: u32,
         since: &str,
+        until: &str,
     ) -> AppResult<Vec<crate::steam::CountryReport>> {
         let conn = self.pool.get().await;
-        let since = since.to_string();
 
         let mut stmt = conn.prepare(
             "SELECT sc.country_code,
                     SUM(sc.adds), SUM(sc.deletes), SUM(sc.purchases), SUM(sc.gifts)
              FROM snapshot_countries sc
              INNER JOIN wishlist_snapshots ws ON ws.id = sc.snapshot_id
-             WHERE ws.app_id = ?1 AND ws.fetched_at >= ?2
+             WHERE ws.app_id = ?1 AND ws.fetched_at >= ?2 AND ws.fetched_at <= ?3
              GROUP BY sc.country_code
              ORDER BY SUM(sc.adds) DESC",
         )?;
         let rows = stmt
-            .query_map(rusqlite::params![app_id, since], |row| {
+            .query_map(rusqlite::params![app_id, since, until], |row| {
                 Ok(crate::steam::CountryReport {
                     country_code: row.get(0)?,
                     adds: row.get(1)?,

@@ -51,7 +51,7 @@
   let destroyed = false;
 
   // Chart range
-  type ChartRange = "1d" | "2d" | "3d" | "7d" | "1m" | "3m" | "1y" | "5y" | "all";
+  type ChartRange = "1d" | "2d" | "3d" | "7d" | "1m" | "3m" | "1y" | "5y" | "all" | "custom";
   const CHART_RANGES: { key: ChartRange; label: string }[] = [
     { key: "1d", label: "1D" },
     { key: "2d", label: "2D" },
@@ -62,8 +62,11 @@
     { key: "1y", label: "1Y" },
     { key: "5y", label: "5Y" },
     { key: "all", label: "All" },
+    { key: "custom", label: "Custom" },
   ];
   let chartRange = $state<ChartRange>("7d");
+  let customFrom = $state<string>("");
+  let customTo = $state<string>("");
 
   // History pagination
   let historyPage = $state(1);
@@ -76,6 +79,7 @@
   // Country lazy-loading
   let expandedCountries = $state<Map<number, CountryEntry[]>>(new Map());
   let loadingCountries = $state<Set<number>>(new Set());
+  let showAllTopCountries = $state(false);
 
   // Animation: track which stats changed on last poll
   let flashMetrics = $state<Set<string>>(new Set());
@@ -178,10 +182,17 @@
     }
   }
 
+  function buildRangeQuery(range: ChartRange): string {
+    if (range === "custom") {
+      return `range=custom&from=${encodeURIComponent(customFrom)}&to=${encodeURIComponent(customTo)}`;
+    }
+    return `range=${range}`;
+  }
+
   async function fetchChart(range: ChartRange, signal?: AbortSignal) {
     chartLoading = true;
     try {
-      const data = await api<ChartResponse>(`/wishlist/${appId}/chart?range=${range}`, { signal });
+      const data = await api<ChartResponse>(`/wishlist/${appId}/chart?${buildRangeQuery(range)}`, { signal });
       if (destroyed) return;
       // Only apply if the range still matches what the user selected
       if (range === chartRange) chartData = data;
@@ -198,7 +209,7 @@
     countryChartLoading = true;
     try {
       const data = await api<AggregatedCountriesResponse>(
-        `/wishlist/${appId}/countries?range=${range}`, { signal }
+        `/wishlist/${appId}/countries?${buildRangeQuery(range)}`, { signal }
       );
       if (destroyed) return;
       if (range === chartRange) countryChartData = data;
@@ -276,11 +287,34 @@
 
   async function changeChartRange(range: ChartRange) {
     chartRange = range;
+    if (range === "custom") {
+      // Initialize defaults the first time the user enters custom mode.
+      if (!customFrom || !customTo) {
+        const today = new Date();
+        const past = new Date();
+        past.setDate(today.getDate() - 30);
+        const fmt = (d: Date) => d.toISOString().slice(0, 10);
+        customTo = fmt(today);
+        customFrom = fmt(past);
+      }
+      // Don't fetch yet — wait for the user to click Apply.
+      return;
+    }
     chartAbortController?.abort();
     chartAbortController = new AbortController();
     await Promise.all([
       fetchChart(range, chartAbortController.signal),
       fetchCountryChart(range, chartAbortController.signal),
+    ]);
+  }
+
+  async function applyCustomRange() {
+    if (!customFrom || !customTo || customFrom > customTo) return;
+    chartAbortController?.abort();
+    chartAbortController = new AbortController();
+    await Promise.all([
+      fetchChart("custom", chartAbortController.signal),
+      fetchCountryChart("custom", chartAbortController.signal),
     ]);
   }
 
@@ -470,7 +504,19 @@
 
     <!-- Chart with range selector -->
     {#if chartData}
-      <Chart history={chartData.points} resolution={chartData.resolution} {chartRange} onRangeChange={changeChartRange} ranges={CHART_RANGES} loading={chartLoading} />
+      <Chart
+        history={chartData.points}
+        resolution={chartData.resolution}
+        {chartRange}
+        onRangeChange={changeChartRange}
+        ranges={CHART_RANGES}
+        loading={chartLoading}
+        {customFrom}
+        {customTo}
+        onCustomFromChange={(v) => (customFrom = v)}
+        onCustomToChange={(v) => (customTo = v)}
+        onApplyCustom={applyCustomRange}
+      />
     {/if}
 
     {#if countryChartData && countryChartData.countries.length > 0}
@@ -480,6 +526,7 @@
     <!-- Top Countries (latest snapshot) -->
     {#if detail.latest && isTodayPacific(detail.latest.date) && detail.latest.countries.length > 0}
       {@const sortedCountries = [...detail.latest.countries].sort((a, b) => b.adds - a.adds)}
+      {@const visibleCountries = showAllTopCountries ? sortedCountries : sortedCountries.slice(0, 20)}
       <div class="countries-section">
         <h2>Top Countries for today <span class="muted-count">({detail.latest.countries.length} total)</span></h2>
         <div class="countries-table-wrap">
@@ -494,7 +541,7 @@
               </tr>
             </thead>
             <tbody>
-              {#each sortedCountries.slice(0, 20) as country}
+              {#each visibleCountries as country}
                 <tr>
                   <td class="country-cell"><span class="country-flag">{countryFlag(country.country_code)}</span> {country.country_code}</td>
                   <td class="num adds">{country.adds.toLocaleString()}</td>
@@ -506,6 +553,19 @@
             </tbody>
           </table>
         </div>
+        {#if sortedCountries.length > 20}
+          <button
+            type="button"
+            class="show-all-btn"
+            onclick={() => showAllTopCountries = !showAllTopCountries}
+          >
+            {#if showAllTopCountries}
+              ▲ Show top 20
+            {:else}
+              ▼ Show all {sortedCountries.length} countries
+            {/if}
+          </button>
+        {/if}
       </div>
     {/if}
 
@@ -1070,6 +1130,23 @@
 
   .countries-table-wrap {
     overflow-x: auto;
+  }
+
+  .show-all-btn {
+    margin-top: 0.75rem;
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    padding: 0.4rem 0.85rem;
+    border-radius: 0.5rem;
+    cursor: pointer;
+    font-size: 0.8rem;
+    transition: all 0.15s ease;
+  }
+
+  .show-all-btn:hover {
+    color: var(--text);
+    border-color: var(--text-muted);
   }
 
   .country-cell {

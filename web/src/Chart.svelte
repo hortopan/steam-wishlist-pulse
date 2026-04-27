@@ -10,6 +10,11 @@
     onRangeChange,
     ranges,
     loading = false,
+    customFrom = "",
+    customTo = "",
+    onCustomFromChange,
+    onCustomToChange,
+    onApplyCustom,
   }: {
     history: ChartPoint[];
     resolution: string;
@@ -17,6 +22,11 @@
     onRangeChange: (range: any) => void;
     ranges: { key: string; label: string }[];
     loading?: boolean;
+    customFrom?: string;
+    customTo?: string;
+    onCustomFromChange?: (v: string) => void;
+    onCustomToChange?: (v: string) => void;
+    onApplyCustom?: () => void;
   } = $props();
 
   let activeMetrics = $state<Set<string>>(new Set(METRIC_KEYS));
@@ -176,6 +186,35 @@
             </button>
           {/each}
         </div>
+        {#if chartRange === "custom" && onApplyCustom && onCustomFromChange && onCustomToChange}
+          <div class="custom-range">
+            <label>
+              From
+              <input
+                type="date"
+                value={customFrom}
+                max={customTo || undefined}
+                oninput={(e) => onCustomFromChange!((e.currentTarget as HTMLInputElement).value)}
+              />
+            </label>
+            <label>
+              To
+              <input
+                type="date"
+                value={customTo}
+                min={customFrom || undefined}
+                oninput={(e) => onCustomToChange!((e.currentTarget as HTMLInputElement).value)}
+              />
+            </label>
+            <button
+              class="range-btn apply"
+              onclick={onApplyCustom}
+              disabled={!customFrom || !customTo || customFrom > customTo}
+            >
+              Apply
+            </button>
+          </div>
+        {/if}
         <div class="chart-legend">
           {#each Object.entries(METRIC_CONFIG) as [key, cfg]}
             <button
@@ -405,6 +444,48 @@
   .range-btn:hover:not(.active) {
     background: rgba(99, 102, 241, 0.1);
     color: var(--accent);
+  }
+
+  .range-btn[disabled] {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .custom-range {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+  }
+
+  .custom-range label {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+  }
+
+  .custom-range input[type="date"] {
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 0.4rem;
+    color: var(--text);
+    padding: 0.25rem 0.5rem;
+    font-size: 0.75rem;
+    font-family: inherit;
+  }
+
+  .custom-range .apply {
+    border: 1px solid var(--border);
+    border-radius: 0.4rem;
+    padding: 0.3rem 0.75rem;
+  }
+
+  .custom-range .apply:not([disabled]) {
+    background: var(--accent);
+    color: white;
+    border-color: var(--accent);
   }
 
   .chart-legend {

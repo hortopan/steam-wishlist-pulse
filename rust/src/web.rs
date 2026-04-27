@@ -1359,9 +1359,69 @@ async fn api_game_detail(
 #[derive(Deserialize)]
 struct ChartQuery {
     range: Option<String>,
+    from: Option<String>,
+    to: Option<String>,
 }
 
-/// GET /api/wishlist/{app_id}/chart?range=7d|1m|3m|1y|5y
+/// Pick resolution for a custom span the same way the presets do.
+fn resolution_for_span_days(days: i64) -> &'static str {
+    if days <= 3 {
+        "raw"
+    } else if days <= 90 {
+        "daily"
+    } else if days <= 365 {
+        "weekly"
+    } else {
+        "monthly"
+    }
+}
+
+/// Parse a "YYYY-MM-DD" date as start-of-day UTC.
+fn parse_date_start(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
+        .ok()
+        .and_then(|d| d.and_hms_opt(0, 0, 0))
+        .map(|ndt| ndt.and_utc())
+}
+
+/// Parse a "YYYY-MM-DD" date as end-of-day UTC (23:59:59).
+fn parse_date_end(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
+        .ok()
+        .and_then(|d| d.and_hms_opt(23, 59, 59))
+        .map(|ndt| ndt.and_utc())
+}
+
+fn bad_request(message: &str) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({ "error": message })),
+    )
+        .into_response()
+}
+
+/// Parse `from`/`to` from a custom-range query, returning (since, until) or a 400 response.
+fn parse_custom_range(
+    query: &ChartQuery,
+) -> Result<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>), Box<Response>> {
+    let from = query
+        .from
+        .as_deref()
+        .and_then(parse_date_start)
+        .ok_or_else(|| Box::new(bad_request("custom range requires from=YYYY-MM-DD")))?;
+    let to = query
+        .to
+        .as_deref()
+        .and_then(parse_date_end)
+        .ok_or_else(|| Box::new(bad_request("custom range requires to=YYYY-MM-DD")))?;
+    if from > to {
+        return Err(Box::new(bad_request("from must be <= to")));
+    }
+    Ok((from, to))
+}
+
+/// GET /api/wishlist/{app_id}/chart?range=7d|1m|3m|1y|5y|custom
+/// For range=custom, also pass from=YYYY-MM-DD&to=YYYY-MM-DD.
 async fn api_game_chart(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -1379,56 +1439,30 @@ async fn api_game_chart(
 
     // Calculate the "since" timestamp and pick resolution
     let now = chrono::Utc::now();
-    let (since, resolution) = match range {
-        "1d" => {
-            let since = now - chrono::TimeDelta::days(1);
-            (since, "raw")
-        }
-        "2d" => {
-            let since = now - chrono::TimeDelta::days(2);
-            (since, "raw")
-        }
-        "3d" => {
-            let since = now - chrono::TimeDelta::days(3);
-            (since, "raw")
-        }
-        "7d" => {
-            let since = now - chrono::TimeDelta::days(7);
-            (since, "daily")
-        }
-        "1m" => {
-            let since = now - chrono::TimeDelta::days(30);
-            (since, "daily")
-        }
-        "3m" => {
-            let since = now - chrono::TimeDelta::days(90);
-            (since, "daily")
-        }
-        "1y" => {
-            let since = now - chrono::TimeDelta::days(365);
-            (since, "weekly")
-        }
-        "5y" => {
-            let since = now - chrono::TimeDelta::days(5 * 365);
-            (since, "monthly")
-        }
-        "all" => {
-            // Far enough back to cover any realistic dataset
-            let since = now - chrono::TimeDelta::days(20 * 365);
-            (since, "monthly")
-        }
-        _ => {
-            let since = now - chrono::TimeDelta::days(7);
-            (since, "daily")
-        }
+    let (since, until, resolution) = match range {
+        "1d" => (now - chrono::TimeDelta::days(1), now, "raw"),
+        "2d" => (now - chrono::TimeDelta::days(2), now, "raw"),
+        "3d" => (now - chrono::TimeDelta::days(3), now, "raw"),
+        "7d" => (now - chrono::TimeDelta::days(7), now, "daily"),
+        "1m" => (now - chrono::TimeDelta::days(30), now, "daily"),
+        "3m" => (now - chrono::TimeDelta::days(90), now, "daily"),
+        "1y" => (now - chrono::TimeDelta::days(365), now, "weekly"),
+        "5y" => (now - chrono::TimeDelta::days(5 * 365), now, "monthly"),
+        "all" => (now - chrono::TimeDelta::days(20 * 365), now, "monthly"),
+        "custom" => match parse_custom_range(&query) {
+            Ok((from, to)) => (from, to, resolution_for_span_days((to - from).num_days())),
+            Err(resp) => return *resp,
+        },
+        _ => (now - chrono::TimeDelta::days(7), now, "daily"),
     };
 
     let since_str = since.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let until_str = until.format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let now_str = now.format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
     let chart_points = state
         .db
-        .get_chart_data(app_id, &since_str, resolution)
+        .get_chart_data(app_id, &since_str, &until_str, resolution)
         .await
         .unwrap_or_default();
 
@@ -1497,7 +1531,7 @@ async fn api_game_chart(
             // Fetch aggregated points with extended lookback for context
             let context_points = state
                 .db
-                .get_chart_data(app_id, &lookback_since, resolution)
+                .get_chart_data(app_id, &lookback_since, &now_str, resolution)
                 .await
                 .unwrap_or_default();
 
@@ -1942,23 +1976,28 @@ async fn api_aggregated_countries(
 
     let range = query.range.as_deref().unwrap_or("7d");
     let now = chrono::Utc::now();
-    let since = match range {
-        "1d" => now - chrono::TimeDelta::days(1),
-        "2d" => now - chrono::TimeDelta::days(2),
-        "3d" => now - chrono::TimeDelta::days(3),
-        "7d" => now - chrono::TimeDelta::days(7),
-        "1m" => now - chrono::TimeDelta::days(30),
-        "3m" => now - chrono::TimeDelta::days(90),
-        "1y" => now - chrono::TimeDelta::days(365),
-        "5y" => now - chrono::TimeDelta::days(5 * 365),
-        "all" => now - chrono::TimeDelta::days(20 * 365),
-        _ => now - chrono::TimeDelta::days(7),
+    let (since, until) = match range {
+        "1d" => (now - chrono::TimeDelta::days(1), now),
+        "2d" => (now - chrono::TimeDelta::days(2), now),
+        "3d" => (now - chrono::TimeDelta::days(3), now),
+        "7d" => (now - chrono::TimeDelta::days(7), now),
+        "1m" => (now - chrono::TimeDelta::days(30), now),
+        "3m" => (now - chrono::TimeDelta::days(90), now),
+        "1y" => (now - chrono::TimeDelta::days(365), now),
+        "5y" => (now - chrono::TimeDelta::days(5 * 365), now),
+        "all" => (now - chrono::TimeDelta::days(20 * 365), now),
+        "custom" => match parse_custom_range(&query) {
+            Ok(pair) => pair,
+            Err(resp) => return *resp,
+        },
+        _ => (now - chrono::TimeDelta::days(7), now),
     };
     let since_str = since.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let until_str = until.format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
     let countries = state
         .db
-        .get_aggregated_countries(app_id, &since_str)
+        .get_aggregated_countries(app_id, &since_str, &until_str)
         .await
         .unwrap_or_default();
 

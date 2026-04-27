@@ -16,6 +16,7 @@
   let selectedMetric = $state<string>('adds');
   let hoveredIndex = $state<number | null>(null);
   let tooltipPos = $state<{ x: number; y: number } | null>(null);
+  let showOtherBreakdown = $state(false);
 
   const TOP_N = 10;
   const SIZE = 300;
@@ -35,6 +36,16 @@
     if (!code || !/^[a-zA-Z]{2}$/.test(code)) return '';
     return [...code.toUpperCase()].map(c => String.fromCodePoint(0x1F1E6 + c.charCodeAt(0) - 65)).join('');
   }
+
+  let otherCountries = $derived.by(() => {
+    if (!countries || countries.length === 0) return [];
+    const metric = selectedMetric as keyof CountryEntry;
+    const sorted = [...countries].sort((a, b) => (b[metric] as number) - (a[metric] as number));
+    return sorted
+      .slice(TOP_N)
+      .filter(c => (c[metric] as number) > 0)
+      .map(c => ({ code: c.country_code, value: c[metric] as number }));
+  });
 
   let slices = $derived.by(() => {
     if (!countries || countries.length === 0) return [];
@@ -152,7 +163,7 @@
           class="metric-btn"
           class:active={selectedMetric === key}
           style="--metric-color: {cfg.color}"
-          onclick={() => selectedMetric = key}
+          onclick={() => { selectedMetric = key; showOtherBreakdown = false; }}
         >
           <span class="metric-dot"></span>
           {cfg.label}
@@ -212,18 +223,41 @@
       </div>
       <div class="pie-legend">
         {#each slices as slice, i}
+          {@const isOther = slice.code === 'OTHER'}
+          {@const otherClickable = isOther && otherCountries.length > 0}
+          <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
           <div
-            role="listitem"
+            role={otherClickable ? 'button' : 'listitem'}
+            tabindex={otherClickable ? 0 : undefined}
             class="pie-legend-item"
             class:dimmed={hoveredIndex !== null && hoveredIndex !== i}
-            onmouseenter={(e) => { hoveredIndex = i; }}
+            class:clickable={otherClickable}
+            onmouseenter={() => { hoveredIndex = i; }}
             onmouseleave={() => { hoveredIndex = null; }}
+            onclick={() => { if (otherClickable) showOtherBreakdown = !showOtherBreakdown; }}
+            onkeydown={(e) => { if (otherClickable && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); showOtherBreakdown = !showOtherBreakdown; } }}
           >
             <span class="pie-legend-dot" style="background: {slice.color}"></span>
-            <span class="pie-legend-label">{slice.label}</span>
+            <span class="pie-legend-label">
+              {slice.label}
+              {#if isOther && otherCountries.length > 0}
+                <span class="pie-legend-chevron">{showOtherBreakdown ? '▲' : '▼'}</span>
+              {/if}
+            </span>
             <span class="pie-legend-value">{formatNumber(slice.value)}</span>
             <span class="pie-legend-pct">{(slice.pct * 100).toFixed(1)}%</span>
           </div>
+          {#if isOther && showOtherBreakdown && otherCountries.length > 0}
+            <div class="pie-legend-sublist">
+              {#each otherCountries as oc}
+                <div class="pie-legend-subitem">
+                  <span class="pie-legend-label">{countryFlag(oc.code)} {oc.code}</span>
+                  <span class="pie-legend-value">{formatNumber(oc.value)}</span>
+                  <span class="pie-legend-pct">{((oc.value / slice.total) * 100).toFixed(1)}%</span>
+                </div>
+              {/each}
+            </div>
+          {/if}
         {/each}
       </div>
     </div>
@@ -384,6 +418,54 @@
 
   .pie-legend-item.dimmed {
     opacity: 0.4;
+  }
+
+  .pie-legend-item.clickable {
+    cursor: pointer;
+    user-select: none;
+  }
+
+  .pie-legend-item.clickable:hover .pie-legend-chevron {
+    color: var(--text);
+  }
+
+  .pie-legend-chevron {
+    color: var(--text-muted);
+    font-size: 0.7rem;
+    margin-left: 0.3rem;
+  }
+
+  .pie-legend-sublist {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    margin: 0.2rem 0 0.4rem 1rem;
+    padding-left: 0.6rem;
+    border-left: 2px solid var(--border);
+  }
+
+  .pie-legend-subitem {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+  }
+
+  .pie-legend-subitem .pie-legend-label {
+    flex: 1;
+    white-space: nowrap;
+  }
+
+  .pie-legend-subitem .pie-legend-value {
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .pie-legend-subitem .pie-legend-pct {
+    font-variant-numeric: tabular-nums;
+    min-width: 3rem;
+    text-align: right;
   }
 
   .pie-legend-dot {
