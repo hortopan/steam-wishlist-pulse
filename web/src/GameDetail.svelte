@@ -443,7 +443,7 @@
             <div class="stat-period-label">All-Time</div>
             <div class="stat-total-value">{detail.latest.total_purchases.toLocaleString()}</div>
           </div>
-          <div class="stat-big-label">Purchases</div>
+          <div class="stat-big-label">Wishlist Conversions</div>
         </div>
         <div
           class="stat-card stat-gifts"
@@ -536,7 +536,7 @@
                 <th>Country</th>
                 <th class="num">Adds</th>
                 <th class="num">Deletes</th>
-                <th class="num">Purchases</th>
+                <th class="num">Wishlist Conversions</th>
                 <th class="num">Gifts</th>
               </tr>
             </thead>
@@ -580,7 +580,7 @@
                 <th>Date</th>
                 <th class="num">Adds</th>
                 <th class="num">Deletes</th>
-                <th class="num">Purchases</th>
+                <th class="num">Wishlist Conversions</th>
                 <th class="num">Gifts</th>
                 <th class="num platform-col">Win</th>
                 <th class="num platform-col">Mac</th>

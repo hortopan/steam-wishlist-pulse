@@ -11,7 +11,7 @@ export const METRIC_CONFIG: Record<
 > = {
   adds: { label: 'Wishlist Adds', color: 'var(--green)', prefix: '' },
   deletes: { label: 'Wishlist Deletes', color: 'var(--red)', prefix: '' },
-  purchases: { label: 'Purchases', color: 'var(--blue)', prefix: '' },
+  purchases: { label: 'Wishlist Conversions', color: 'var(--blue)', prefix: '' },
   gifts: { label: 'Gifts', color: 'var(--amber)', prefix: '' },
 };
 

@@ -198,7 +198,7 @@
               <span class="stat-value">{game.total_deletes.toLocaleString()}</span>
             </div>
             <div class="stat stat-purchases">
-              <span class="stat-label">Purchases</span>
+              <span class="stat-label">Wishlist Conversions</span>
               <span class="stat-value">{game.total_purchases.toLocaleString()}</span>
             </div>
             <div class="stat stat-gifts">
@@ -219,7 +219,7 @@
                 <span class="stat-value">{game.deletes.toLocaleString()}</span>
               </div>
               <div class="stat stat-purchases">
-                <span class="stat-label">Purchases</span>
+                <span class="stat-label">Wishlist Conversions</span>
                 <span class="stat-value">{game.purchases.toLocaleString()}</span>
               </div>
               <div class="stat stat-gifts">

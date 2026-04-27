@@ -117,7 +117,7 @@
         <span class="stat-dot">&middot;</span>
         <div class="stat-pill stat-purchases">
           <span class="stat-value">{detail.latest.total_purchases.toLocaleString()}</span>
-          <span class="stat-label">Purchases</span>
+          <span class="stat-label">Wishlist Conversions</span>
         </div>
         <span class="stat-dot">&middot;</span>
         <div class="stat-pill stat-gifts">
