@@ -648,10 +648,71 @@
     text-align: center;
   }
 
-  @media (max-width: 640px) {
+  @media (max-width: 820px) {
+    .chart-section {
+      padding: 1rem;
+    }
+
     .chart-header {
       flex-direction: column;
-      align-items: flex-start;
+      align-items: stretch;
+    }
+
+    .chart-controls {
+      width: 100%;
+      flex-direction: column;
+      align-items: stretch;
+      gap: 0.5rem;
+    }
+
+    .range-selector {
+      width: 100%;
+      flex-wrap: wrap;
+      border: none;
+      border-radius: 0;
+      overflow: visible;
+      gap: 0.35rem;
+    }
+
+    .range-btn {
+      flex: 1 1 auto;
+      border: 1px solid var(--border);
+      border-radius: 0.4rem;
+      padding: 0.35rem 0.5rem;
+    }
+
+    .range-btn:last-child {
+      border-right: 1px solid var(--border);
+    }
+
+    .custom-range {
+      width: 100%;
+      flex-direction: column;
+      align-items: stretch;
+      gap: 0.4rem;
+    }
+
+    .custom-range label {
+      width: 100%;
+      justify-content: space-between;
+    }
+
+    .custom-range input[type="date"] {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .custom-range .apply {
+      width: 100%;
+    }
+
+    .chart-legend {
+      width: 100%;
+    }
+
+    .legend-btn {
+      flex: 1 1 auto;
+      justify-content: center;
     }
   }
 </style>
