@@ -158,7 +158,12 @@ fn build_config(args: CliArgs) -> Result<AppConfig, String> {
     let admin_password = env::var(ENV_ADMIN_PASSWORD).ok();
     let read_password = env::var(ENV_READ_PASSWORD).ok();
     let force_password_reset = env::var(ENV_FORCE_PASSWORD_RESET)
-        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
         .unwrap_or(false);
 
     // database_path
