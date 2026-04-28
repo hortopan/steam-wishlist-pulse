@@ -9,6 +9,7 @@ const ENV_BIND_WEB_INTERFACE: &str = "BIND_WEB_INTERFACE";
 const ENV_DATABASE_PATH: &str = "DATABASE_PATH";
 const ENV_ADMIN_PASSWORD: &str = "ADMIN_PASSWORD";
 const ENV_READ_PASSWORD: &str = "READ_PASSWORD";
+const ENV_FORCE_PASSWORD_RESET: &str = "FORCE_PASSWORD_RESET";
 const ENV_POLL_INTERVAL: &str = "POLL_INTERVAL_MINUTES";
 const ENV_BACKFILL_RATE: &str = "BACKFILL_RATE";
 const ENV_ENCRYPTION_SECRET: &str = "ENCRYPTION_SECRET";
@@ -50,6 +51,7 @@ pub struct AppConfig {
     pub database_path: PathBuf,
     pub admin_password: Option<String>,
     pub read_password: Option<String>,
+    pub force_password_reset: bool,
     pub insecure: bool,
     pub poll_interval_minutes: u64,
     pub backfill_rate: f64,
@@ -103,9 +105,10 @@ fn print_usage_hint() {
     eprintln!();
     eprintln!("{}", "ENVIRONMENT VARIABLES:".cyan().bold());
     eprintln!(
-        "  {} {} {} {} {} {} {}",
+        "  {} {} {} {} {} {} {} {}",
         ENV_ADMIN_PASSWORD.yellow(),
         ENV_READ_PASSWORD.yellow(),
+        ENV_FORCE_PASSWORD_RESET.yellow(),
         ENV_BIND_WEB_INTERFACE.yellow(),
         ENV_DATABASE_PATH.yellow(),
         ENV_POLL_INTERVAL.yellow(),
@@ -128,6 +131,11 @@ fn print_usage_hint() {
         "  {}",
         "If no passwords are provided, a welcome page will be shown to set them up.".dimmed()
     );
+    eprintln!();
+    eprintln!(
+        "  {}",
+        "Set FORCE_PASSWORD_RESET=1 alongside ADMIN_PASSWORD/READ_PASSWORD to overwrite an existing password (recovery).".dimmed()
+    );
 }
 
 impl AppConfig {
@@ -149,6 +157,9 @@ fn build_config(args: CliArgs) -> Result<AppConfig, String> {
     let bind_web_interface = resolve_string(args.bind_web_interface, ENV_BIND_WEB_INTERFACE)?;
     let admin_password = env::var(ENV_ADMIN_PASSWORD).ok();
     let read_password = env::var(ENV_READ_PASSWORD).ok();
+    let force_password_reset = env::var(ENV_FORCE_PASSWORD_RESET)
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false);
 
     // database_path
     let database_path_str = resolve_string(args.database_path, ENV_DATABASE_PATH)?;
@@ -192,6 +203,7 @@ fn build_config(args: CliArgs) -> Result<AppConfig, String> {
         database_path,
         admin_password,
         read_password,
+        force_password_reset,
         insecure: args.insecure,
         poll_interval_minutes,
         backfill_rate,

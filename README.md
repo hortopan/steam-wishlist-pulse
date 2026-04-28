@@ -151,13 +151,29 @@ Options can be set via CLI flags, environment variables, or both (passwords are 
 | ------------------------- | ----------------------- | --------------------------------------- | ------------------------------------------- |
 | `--bind-web-interface`    | `BIND_WEB_INTERFACE`    | `0.0.0.0:3000`                          | Web UI address                              |
 | `--database-path`         | `DATABASE_PATH`         | `~/.local/share/wishlist-pulse/data.db` | SQLite database location                    |
-| —                         | `ADMIN_PASSWORD`        | *(set via UI)*                          | Admin password (env only)                   |
-| —                         | `READ_PASSWORD`         | *(set via UI)*                          | Read-only password (env only)               |
+| —                         | `ADMIN_PASSWORD`        | *(set via UI)*                          | Admin password (env only, seeds on first boot) |
+| —                         | `READ_PASSWORD`         | *(set via UI)*                          | Read-only password (env only, seeds on first boot) |
+| —                         | `FORCE_PASSWORD_RESET`  | `false`                                 | Overwrite existing password(s) with `ADMIN_PASSWORD` / `READ_PASSWORD` (recovery) |
 | `--poll-interval-minutes` | `POLL_INTERVAL_MINUTES` | `5`                                     | Steam polling interval                      |
 | `--insecure`              | —                       | `false`                                 | Disable HTTPS cookie requirement (dev only) |
 | —                         | `ENCRYPTION_SECRET`     | *(none)*                                | Passphrase for encrypting sensitive data at rest |
 
 Everything else — API keys, Telegram config, tracked games — is managed through the dashboard.
+
+<details>
+<summary><strong>Recovering a lost password</strong></summary>
+
+`ADMIN_PASSWORD` and `READ_PASSWORD` only seed the database on first boot — once a password is stored, those env vars are ignored. To recover a lost password, set `FORCE_PASSWORD_RESET=1` alongside the password you want to overwrite, then restart once:
+
+```bash
+FORCE_PASSWORD_RESET=1 ADMIN_PASSWORD='new-strong-password' wishlist-pulse
+```
+
+After it boots successfully (look for `Admin password reset from env (FORCE_PASSWORD_RESET)` in the logs), **remove `FORCE_PASSWORD_RESET`, `ADMIN_PASSWORD`, and `READ_PASSWORD` from your environment** — `FORCE_PASSWORD_RESET` so future restarts don't keep overwriting, and the password vars so a plaintext password isn't sitting in `/proc/<pid>/environ` or `ps eww` output longer than necessary. All existing browser sessions are invalidated — you'll need to log in again.
+
+You can reset both passwords in the same boot by setting `ADMIN_PASSWORD` and `READ_PASSWORD` together with `FORCE_PASSWORD_RESET=1`.
+
+</details>
 
 <details>
 <summary><strong>HTTPS & cookies</strong></summary>

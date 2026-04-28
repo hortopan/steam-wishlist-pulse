@@ -3230,49 +3230,91 @@ async fn shutdown_signal() {
     tracing::info!("Shutting down...");
 }
 
-/// Initialize passwords from CLI/env args into the database (if provided and not already set).
+/// Initialize passwords from CLI/env args into the database.
+///
+/// By default, env-provided passwords only seed an empty slot — if a hash
+/// already exists for that key the env value is ignored. Setting
+/// `force_reset = true` overwrites the existing hash (recovery flow) and
+/// clears the JWT secret so all existing sessions are invalidated.
+///
+/// Must be called before [`AppState`] is constructed: the JWT secret is
+/// cleared at the database layer only, so any in-memory `cached_jwt_secret`
+/// would survive. Running this pre-startup avoids that — the cache simply
+/// doesn't exist yet, and the first `jwt_secret()` call after boot will
+/// lazily generate a fresh secret.
 pub async fn init_passwords_from_config(
     db: &Database,
     admin_password: Option<&str>,
     read_password: Option<&str>,
+    force_reset: bool,
 ) {
-    if let Some(pw) = admin_password
-        && !pw.trim().is_empty()
-    {
+    let admin_pw = admin_password.map(str::trim).filter(|p| !p.is_empty());
+    let read_pw = read_password.map(str::trim).filter(|p| !p.is_empty());
+    let mut any_force_overwrite = false;
+
+    if let Some(pw) = admin_pw {
         let existing = db
             .get_config(CONFIG_ADMIN_PASSWORD_HASH)
             .await
             .ok()
             .flatten();
-        if existing.is_none() {
+        let is_overwrite = existing.is_some() && force_reset;
+        if existing.is_none() || is_overwrite {
             if let Err(e) = db
-                .set_config(CONFIG_ADMIN_PASSWORD_HASH, &hash_password(pw.trim()))
+                .set_config(CONFIG_ADMIN_PASSWORD_HASH, &hash_password(pw))
                 .await
             {
                 tracing::error!("Failed to set admin password: {e}");
+            } else if is_overwrite {
+                tracing::warn!("Admin password reset from env (FORCE_PASSWORD_RESET)");
+                any_force_overwrite = true;
             } else {
                 tracing::info!("Admin password set from CLI/env");
             }
+        } else {
+            tracing::warn!(
+                "ADMIN_PASSWORD is set but a password is already stored — ignoring. Set FORCE_PASSWORD_RESET=1 to overwrite."
+            );
         }
     }
 
-    if let Some(pw) = read_password
-        && !pw.trim().is_empty()
-    {
+    if let Some(pw) = read_pw {
         let existing = db
             .get_config(CONFIG_READ_PASSWORD_HASH)
             .await
             .ok()
             .flatten();
-        if existing.is_none() {
+        let is_overwrite = existing.is_some() && force_reset;
+        if existing.is_none() || is_overwrite {
             if let Err(e) = db
-                .set_config(CONFIG_READ_PASSWORD_HASH, &hash_password(pw.trim()))
+                .set_config(CONFIG_READ_PASSWORD_HASH, &hash_password(pw))
                 .await
             {
                 tracing::error!("Failed to set read password: {e}");
+            } else if is_overwrite {
+                tracing::warn!("Read-only password reset from env (FORCE_PASSWORD_RESET)");
+                any_force_overwrite = true;
             } else {
                 tracing::info!("Read-only password set from CLI/env");
             }
+        } else {
+            tracing::warn!(
+                "READ_PASSWORD is set but a password is already stored — ignoring. Set FORCE_PASSWORD_RESET=1 to overwrite."
+            );
+        }
+    }
+
+    if force_reset && admin_pw.is_none() && read_pw.is_none() {
+        tracing::warn!(
+            "FORCE_PASSWORD_RESET is set but no ADMIN_PASSWORD or READ_PASSWORD provided; nothing to reset"
+        );
+    }
+
+    if any_force_overwrite {
+        if let Err(e) = db.delete_config(CONFIG_JWT_SECRET).await {
+            tracing::error!("Failed to clear JWT secret after password reset: {e}");
+        } else {
+            tracing::warn!("JWT secret cleared; all existing sessions invalidated");
         }
     }
 }

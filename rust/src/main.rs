@@ -45,6 +45,7 @@ async fn main() {
         &db,
         config.admin_password.as_deref(),
         config.read_password.as_deref(),
+        config.force_password_reset,
     )
     .await;
 
