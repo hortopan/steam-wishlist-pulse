@@ -1564,8 +1564,10 @@ impl Database {
     }
 
     /// Get aggregated country data for a game within a time range.
-    /// Sums adds/deletes/purchases/gifts across all snapshots in the window,
-    /// grouped by country_code, ordered by total adds descending.
+    /// Per-country totals over the window, ordered by total adds descending.
+    /// Inner query: MAX per (date, country) — Steam values are per-date running
+    /// totals, so MAX gives the day's total. Outer query: SUM across days.
+    /// Without the inner MAX, multiple intra-day snapshots would be double-counted.
     pub async fn get_aggregated_countries(
         &self,
         app_id: u32,
@@ -1575,13 +1577,20 @@ impl Database {
         let conn = self.pool.get().await;
 
         let mut stmt = conn.prepare(
-            "SELECT sc.country_code,
-                    SUM(sc.adds), SUM(sc.deletes), SUM(sc.purchases), SUM(sc.gifts)
-             FROM snapshot_countries sc
-             INNER JOIN wishlist_snapshots ws ON ws.id = sc.snapshot_id
-             WHERE ws.app_id = ?1 AND ws.fetched_at >= ?2 AND ws.fetched_at <= ?3
-             GROUP BY sc.country_code
-             ORDER BY SUM(sc.adds) DESC",
+            "SELECT country_code,
+                    SUM(daily_adds), SUM(daily_deletes),
+                    SUM(daily_purchases), SUM(daily_gifts)
+             FROM (
+                 SELECT ws.date, sc.country_code,
+                        MAX(sc.adds) as daily_adds, MAX(sc.deletes) as daily_deletes,
+                        MAX(sc.purchases) as daily_purchases, MAX(sc.gifts) as daily_gifts
+                 FROM snapshot_countries sc
+                 INNER JOIN wishlist_snapshots ws ON ws.id = sc.snapshot_id
+                 WHERE ws.app_id = ?1 AND ws.fetched_at >= ?2 AND ws.fetched_at <= ?3
+                 GROUP BY ws.date, sc.country_code
+             )
+             GROUP BY country_code
+             ORDER BY SUM(daily_adds) DESC",
         )?;
         let rows = stmt
             .query_map(rusqlite::params![app_id, since, until], |row| {

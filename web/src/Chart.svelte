@@ -170,51 +170,51 @@
   });
 </script>
 
-{#if chartData}
-  <div class="chart-section">
-    <div class="chart-header">
-      <h2>Historical Trends</h2>
-      <div class="chart-controls">
-        <div class="range-selector">
-          {#each ranges as r}
-            <button
-              class="range-btn"
-              class:active={chartRange === r.key}
-              onclick={() => onRangeChange(r.key)}
-            >
-              {r.label}
-            </button>
-          {/each}
+<div class="chart-section">
+  <div class="chart-header">
+    <h2>Historical Trends</h2>
+    <div class="chart-controls">
+      <div class="range-selector">
+        {#each ranges as r}
+          <button
+            class="range-btn"
+            class:active={chartRange === r.key}
+            onclick={() => onRangeChange(r.key)}
+          >
+            {r.label}
+          </button>
+        {/each}
+      </div>
+      {#if chartRange === "custom" && onApplyCustom && onCustomFromChange && onCustomToChange}
+        <div class="custom-range">
+          <label>
+            From
+            <input
+              type="date"
+              value={customFrom}
+              max={customTo || undefined}
+              oninput={(e) => onCustomFromChange!((e.currentTarget as HTMLInputElement).value)}
+            />
+          </label>
+          <label>
+            To
+            <input
+              type="date"
+              value={customTo}
+              min={customFrom || undefined}
+              oninput={(e) => onCustomToChange!((e.currentTarget as HTMLInputElement).value)}
+            />
+          </label>
+          <button
+            class="range-btn apply"
+            onclick={onApplyCustom}
+            disabled={!customFrom || !customTo || customFrom > customTo}
+          >
+            Apply
+          </button>
         </div>
-        {#if chartRange === "custom" && onApplyCustom && onCustomFromChange && onCustomToChange}
-          <div class="custom-range">
-            <label>
-              From
-              <input
-                type="date"
-                value={customFrom}
-                max={customTo || undefined}
-                oninput={(e) => onCustomFromChange!((e.currentTarget as HTMLInputElement).value)}
-              />
-            </label>
-            <label>
-              To
-              <input
-                type="date"
-                value={customTo}
-                min={customFrom || undefined}
-                oninput={(e) => onCustomToChange!((e.currentTarget as HTMLInputElement).value)}
-              />
-            </label>
-            <button
-              class="range-btn apply"
-              onclick={onApplyCustom}
-              disabled={!customFrom || !customTo || customFrom > customTo}
-            >
-              Apply
-            </button>
-          </div>
-        {/if}
+      {/if}
+      {#if chartData}
         <div class="chart-legend">
           {#each Object.entries(METRIC_CONFIG) as [key, cfg]}
             <button
@@ -228,8 +228,10 @@
             </button>
           {/each}
         </div>
-      </div>
+      {/if}
     </div>
+  </div>
+  {#if chartData}
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div class="chart-container" class:chart-loading={loading} onmouseleave={() => (hoveredPoint = null)}>
       {#if loading}
@@ -373,13 +375,17 @@
         </div>
       {/if}
     </div>
-  </div>
-{:else if history.length > 0}
-  <div class="chart-section">
-    <h2>Historical Trends</h2>
-    <p class="chart-placeholder">Not enough data to display a chart yet.</p>
-  </div>
-{/if}
+  {:else}
+    <div class="chart-container chart-empty" class:chart-loading={loading}>
+      {#if loading}
+        <div class="chart-overlay">
+          <div class="chart-spinner"></div>
+        </div>
+      {/if}
+      <p class="chart-placeholder">No data for this range yet.</p>
+    </div>
+  {/if}
+</div>
 
 <style>
   .chart-section {
