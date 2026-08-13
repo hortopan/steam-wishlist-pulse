@@ -47,6 +47,8 @@ export interface GameDetailResponse {
 
 export interface ChartPoint {
   label: string;
+  /** Steam reporting date (YYYY-MM-DD, Pacific). */
+  date: string;
   adds: number;
   deletes: number;
   purchases: number;
@@ -63,8 +65,22 @@ export interface ChartResponse {
   points: ChartPoint[];
 }
 
-export interface HistoryEntry {
+export interface HistorySnapshotEntry {
   snapshot_id: number;
+  fetched_at: string;
+  delta_adds: number;
+  delta_deletes: number;
+  delta_purchases: number;
+  delta_gifts: number;
+  delta_adds_windows: number;
+  delta_adds_mac: number;
+  delta_adds_linux: number;
+  /** True for backfill/verification rows whose fetched_at is a sentinel, not a real time. */
+  is_eod_report: boolean;
+}
+
+export interface HistoryDayEntry {
+  /** Steam reporting date (YYYY-MM-DD, Pacific). */
   date: string;
   adds: number;
   deletes: number;
@@ -73,20 +89,23 @@ export interface HistoryEntry {
   adds_windows: number;
   adds_mac: number;
   adds_linux: number;
-  fetched_at: string;
+  snapshot_count: number;
+  last_snapshot_id: number;
+  is_daily_report: boolean;
   is_anomaly: boolean;
   anomaly_metrics: AnomalyMetrics;
+  snapshots: HistorySnapshotEntry[];
 }
 
-export interface PaginatedHistoryResponse {
-  entries: HistoryEntry[];
-  total: number;
+export interface DailyHistoryResponse {
+  days: HistoryDayEntry[];
+  total_days: number;
   page: number;
   per_page: number;
 }
 
-export interface SnapshotCountriesResponse {
-  snapshot_id: number;
+export interface DayCountriesResponse {
+  date: string;
   countries: CountryEntry[];
 }
 

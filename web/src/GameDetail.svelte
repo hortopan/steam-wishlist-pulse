@@ -2,29 +2,21 @@
   import { onMount, onDestroy } from "svelte";
   import { playNotificationSound } from "./notificationSound";
   import { api, AuthError } from "./api";
-  import { timeAgo, isTodayPacific } from "./utils";
+  import { timeAgo, isTodayPacific, toLocalYMD, countryFlag } from "./utils";
   import { POLL_INTERVAL, TICK_INTERVAL, FLASH_DURATION, FLASH_ROW_DURATION, METRIC_KEYS } from "./constants";
   import type {
-    CountryEntry,
     GameReport,
     GameDetailResponse,
     ChartResponse,
-    ChartPoint,
-    PaginatedHistoryResponse,
-    HistoryEntry,
-    SnapshotCountriesResponse,
+    DailyHistoryResponse,
     AggregatedCountriesResponse,
     SyncStatus,
   } from "./types";
   import Chart from "./Chart.svelte";
   import CountryPieChart from "./CountryPieChart.svelte";
+  import HistoryTable from "./HistoryTable.svelte";
   import MilestoneCelebration from "./MilestoneCelebration.svelte";
   import SyncProgressBar from "./SyncProgressBar.svelte";
-
-  function countryFlag(code: string): string {
-    if (!code || !/^[a-zA-Z]{2}$/.test(code)) return "";
-    return [...code.toUpperCase()].map(c => String.fromCodePoint(0x1F1E6 + c.charCodeAt(0) - 65)).join("");
-  }
 
   let {
     appId,
@@ -39,7 +31,7 @@
   // ── State ──────────────────────────────────────────────────────
   let detail = $state<GameDetailResponse | null>(null);
   let chartData = $state<ChartResponse | null>(null);
-  let historyData = $state<PaginatedHistoryResponse | null>(null);
+  let historyData = $state<DailyHistoryResponse | null>(null);
   let loading = $state(true);
   let error = $state<string | null>(null);
   let celebrationMode = $state(false);
@@ -70,53 +62,22 @@
 
   // History pagination
   let historyPage = $state(1);
-  const HISTORY_PAGE_SIZE = 24;
+  const HISTORY_DAYS_PER_PAGE = 7;
   let historyLoading = $state(false);
   let chartLoading = $state(false);
   let countryChartData = $state<AggregatedCountriesResponse | null>(null);
   let countryChartLoading = $state(false);
 
-  // Country lazy-loading
-  let expandedCountries = $state<Map<number, CountryEntry[]>>(new Map());
-  let loadingCountries = $state<Set<number>>(new Set());
   let showAllTopCountries = $state(false);
 
   // Animation: track which stats changed on last poll
   let flashMetrics = $state<Set<string>>(new Set());
-  let flashRows = $state<Set<string>>(new Set());
+  let flashDates = $state<Set<string>>(new Set());
+  let flashSnapshotIds = $state<Set<number>>(new Set());
   let prevLatest: GameReport | null = null;
   let prevHistoryIds = new Set<number>();
+  let lastHistoryTotal = -1;
   let syncStatus = $state<SyncStatus | null>(null);
-
-  // Anomaly popover state
-  let anomalyPopover = $state<{
-    x: number;
-    y: number;
-    metric: string;
-    desc: string;
-  } | null>(null);
-  let anomalyPopoverTimer: ReturnType<typeof setTimeout> | null = null;
-
-  function showAnomalyPopover(e: MouseEvent, entry: HistoryEntry, metric: string) {
-    if (anomalyPopoverTimer) clearTimeout(anomalyPopoverTimer);
-    const rect = (e.target as HTMLElement).getBoundingClientRect();
-    const am = entry.anomaly_metrics;
-    const desc = (am?.descriptions ?? []).find(d => d.toLowerCase().startsWith(metric)) ?? 'Anomalous change detected';
-    anomalyPopover = { x: rect.left + rect.width / 2, y: rect.top, metric, desc };
-  }
-
-  function hideAnomalyPopover() {
-    anomalyPopoverTimer = setTimeout(() => { anomalyPopover = null; }, 150);
-  }
-
-  function toggleAnomalyPopover(e: MouseEvent, entry: HistoryEntry, metric: string) {
-    e.stopPropagation();
-    if (anomalyPopover && anomalyPopover.metric === metric) {
-      anomalyPopover = null;
-    } else {
-      showAnomalyPopover(e, entry, metric);
-    }
-  }
 
   function schedulePoll() {
     pollTimer = setTimeout(async () => {
@@ -165,13 +126,15 @@
         // Non-critical
       }
 
-      // Refresh chart and first page of history on each poll
+      // Refresh chart on each poll; history page 1 only when new snapshots exist
+      const historyStale = historyPage === 1 && newDetail.total_snapshots !== lastHistoryTotal;
+      if (historyStale) lastHistoryTotal = newDetail.total_snapshots;
       chartAbortController?.abort();
       chartAbortController = new AbortController();
       await Promise.all([
         fetchChart(chartRange, chartAbortController.signal),
         fetchCountryChart(chartRange, chartAbortController.signal),
-        historyPage === 1 ? fetchHistory(1, signal) : Promise.resolve(),
+        historyStale ? fetchHistory(1, signal) : Promise.resolve(),
       ]);
     } catch (e: any) {
       if (signal.aborted) return;
@@ -224,27 +187,39 @@
   async function fetchHistory(page: number, signal?: AbortSignal) {
     historyLoading = true;
     try {
-      const newHistory = await api<PaginatedHistoryResponse>(
-        `/wishlist/${appId}/history?page=${page}&per_page=${HISTORY_PAGE_SIZE}`,
+      const newHistory = await api<DailyHistoryResponse>(
+        `/wishlist/${appId}/history?page=${page}&per_page=${HISTORY_DAYS_PER_PAGE}`,
         { signal },
       );
       if (destroyed) return;
 
-      // Detect new rows for flash animation
-      if (page === 1 && historyData) {
-        const newDates = new Set<string>();
-        for (const entry of newHistory.entries) {
-          if (!prevHistoryIds.has(entry.snapshot_id)) {
-            newDates.add(entry.date);
+      // Detect new snapshots for flash animation. Ids are tracked for page 1
+      // only, so paging back from an older page doesn't flash the whole table.
+      if (page === 1) {
+        if (prevHistoryIds.size > 0) {
+          const newIds = new Set<number>();
+          const newDates = new Set<string>();
+          for (const day of newHistory.days) {
+            for (const s of day.snapshots) {
+              if (!prevHistoryIds.has(s.snapshot_id)) {
+                newIds.add(s.snapshot_id);
+                newDates.add(day.date);
+              }
+            }
+          }
+          if (newIds.size > 0) {
+            flashDates = newDates;
+            flashSnapshotIds = newIds;
+            setTimeout(() => {
+              flashDates = new Set();
+              flashSnapshotIds = new Set();
+            }, FLASH_ROW_DURATION);
           }
         }
-        if (newDates.size > 0) {
-          flashRows = newDates;
-          setTimeout(() => (flashRows = new Set()), FLASH_ROW_DURATION);
-        }
+        prevHistoryIds = new Set(
+          newHistory.days.flatMap(d => d.snapshots.map(s => s.snapshot_id)),
+        );
       }
-
-      prevHistoryIds = new Set(newHistory.entries.map(e => e.snapshot_id));
       historyData = newHistory;
       historyPage = page;
     } catch (e: any) {
@@ -256,35 +231,6 @@
     }
   }
 
-  async function loadCountries(snapshotId: number) {
-    if (expandedCountries.has(snapshotId)) {
-      // Toggle off
-      const next = new Map(expandedCountries);
-      next.delete(snapshotId);
-      expandedCountries = next;
-      return;
-    }
-
-    const nextLoading = new Set(loadingCountries);
-    nextLoading.add(snapshotId);
-    loadingCountries = nextLoading;
-
-    try {
-      const resp = await api<SnapshotCountriesResponse>(
-        `/wishlist/${appId}/countries/${snapshotId}`
-      );
-      const next = new Map(expandedCountries);
-      next.set(snapshotId, resp.countries);
-      expandedCountries = next;
-    } catch (e: any) {
-      if (e instanceof AuthError) { onLogout(); return; }
-    } finally {
-      const nextLoading = new Set(loadingCountries);
-      nextLoading.delete(snapshotId);
-      loadingCountries = nextLoading;
-    }
-  }
-
   async function changeChartRange(range: ChartRange) {
     chartRange = range;
     if (range === "custom") {
@@ -293,9 +239,8 @@
         const today = new Date();
         const past = new Date();
         past.setDate(today.getDate() - 30);
-        const fmt = (d: Date) => d.toISOString().slice(0, 10);
-        customTo = fmt(today);
-        customFrom = fmt(past);
+        customTo = toLocalYMD(today);
+        customFrom = toLocalYMD(past);
       }
       // Don't fetch yet — wait for the user to click Apply.
       return;
@@ -403,12 +348,12 @@
     {#if detail.latest}
       {@const hasToday = isTodayPacific(detail.latest.date)}
       {#if !hasToday}
-        <div class="no-today-banner">No data from Steam yet today — showing all-time totals only</div>
+        <div class="no-today-banner">No data from Steam yet today (Pacific Time) — showing all-time totals only</div>
       {/if}
       <div class="stats-row">
         <div class="stat-card stat-adds" class:flash={flashMetrics.has("adds")}>
           <div class="stat-section-today">
-            <div class="stat-period-label">Today</div>
+            <div class="stat-period-label">Today (PT)</div>
             <div class="stat-big-value">{hasToday ? detail.latest.adds.toLocaleString() : "—"}</div>
           </div>
           <div class="stat-section-total">
@@ -422,7 +367,7 @@
           class:flash={flashMetrics.has("deletes")}
         >
           <div class="stat-section-today">
-            <div class="stat-period-label">Today</div>
+            <div class="stat-period-label">Today (PT)</div>
             <div class="stat-big-value">{hasToday ? detail.latest.deletes.toLocaleString() : "—"}</div>
           </div>
           <div class="stat-section-total">
@@ -436,7 +381,7 @@
           class:flash={flashMetrics.has("purchases")}
         >
           <div class="stat-section-today">
-            <div class="stat-period-label">Today</div>
+            <div class="stat-period-label">Today (PT)</div>
             <div class="stat-big-value">{hasToday ? detail.latest.purchases.toLocaleString() : "—"}</div>
           </div>
           <div class="stat-section-total">
@@ -450,7 +395,7 @@
           class:flash={flashMetrics.has("gifts")}
         >
           <div class="stat-section-today">
-            <div class="stat-period-label">Today</div>
+            <div class="stat-period-label">Today (PT)</div>
             <div class="stat-big-value">{hasToday ? detail.latest.gifts.toLocaleString() : "—"}</div>
           </div>
           <div class="stat-section-total">
@@ -487,7 +432,7 @@
       <!-- Net Change -->
       {@const net = detail.latest.adds - detail.latest.deletes - detail.latest.purchases - detail.latest.gifts}
       <div class="net-row" class:flash-net={flashMetrics.size > 0}>
-        <span class="net-label">Net Wishlist Change Today</span>
+        <span class="net-label">Net Wishlist Change Today (PT)</span>
         <span
           class="net-value"
           class:positive={net > 0}
@@ -528,7 +473,7 @@
       {@const sortedCountries = [...detail.latest.countries].sort((a, b) => b.adds - a.adds)}
       {@const visibleCountries = showAllTopCountries ? sortedCountries : sortedCountries.slice(0, 20)}
       <div class="countries-section">
-        <h2>Top Countries for today <span class="muted-count">({detail.latest.countries.length} total)</span></h2>
+        <h2>Top Countries Today (PT) <span class="muted-count">({detail.latest.countries.length} total)</span></h2>
         <div class="countries-table-wrap">
           <table class="history-table">
             <thead>
@@ -569,133 +514,15 @@
       </div>
     {/if}
 
-    <!-- Snapshot History Table (server-paginated) -->
-    {#if historyData && historyData.entries.length > 0}
-      <div class="history-section">
-        <h2>Snapshot History <span class="muted-count">({historyData.total} total, page {historyData.page})</span></h2>
-        <div class="history-table-wrap">
-          <table class="history-table">
-            <thead>
-              <tr>
-                <th>Date</th>
-                <th class="num">Adds</th>
-                <th class="num">Deletes</th>
-                <th class="num">Wishlist Conversions</th>
-                <th class="num">Gifts</th>
-                <th class="num platform-col">Win</th>
-                <th class="num platform-col">Mac</th>
-                <th class="num platform-col">Linux</th>
-                <th>Recorded</th>
-                <th class="num">Countries</th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each historyData.entries as entry}
-                <tr class:flash-row={flashRows.has(entry.date)}>
-                  <td>
-                    {entry.date.split("T")[0]}
-                  </td>
-                  {#each ['adds', 'deletes', 'purchases', 'gifts'] as metric}
-                    {@const am = entry.anomaly_metrics}
-                    {@const isAnomaly = !!(am as any)?.[metric]}
-                    {@const desc = isAnomaly ? (am?.descriptions ?? []).find(d => d.toLowerCase().startsWith(metric)) : null}
-                    {@const isUp = desc ? /above|spike/i.test(desc) : false}
-                    <td class="num {metric}">
-                      {((entry as any)[metric] as number).toLocaleString()}
-                      {#if isAnomaly}
-                        <button
-                          type="button"
-                          class="anomaly-arrow"
-                          class:up={isUp}
-                          class:down={!isUp}
-                          onclick={(e: MouseEvent) => toggleAnomalyPopover(e, entry, metric)}
-                          onmouseenter={(e: MouseEvent) => showAnomalyPopover(e, entry, metric)}
-                          onmouseleave={() => hideAnomalyPopover()}
-                          title={desc ?? 'Anomalous change detected'}
-                        >{isUp ? '▲' : '▼'}</button>
-                      {/if}
-                    </td>
-                  {/each}
-                  <td class="num platform-val">{entry.adds_windows.toLocaleString()}</td>
-                  <td class="num platform-val">{entry.adds_mac.toLocaleString()}</td>
-                  <td class="num platform-val">{entry.adds_linux.toLocaleString()}</td>
-                  <td class="muted"
-                    >{entry.fetched_at
-                      ? timeAgo(entry.fetched_at, now)
-                      : "—"}</td
-                  >
-                  <td class="num">
-                    <button
-                      class="country-expand-btn"
-                      class:loading-spin={loadingCountries.has(entry.snapshot_id)}
-                      onclick={() => loadCountries(entry.snapshot_id)}
-                      title={expandedCountries.has(entry.snapshot_id) ? "Hide countries" : "Show countries"}
-                    >
-                      {#if loadingCountries.has(entry.snapshot_id)}
-                        <span class="mini-spinner"></span>
-                      {:else if expandedCountries.has(entry.snapshot_id)}
-                        ▲
-                      {:else}
-                        ▼
-                      {/if}
-                    </button>
-                  </td>
-                </tr>
-                {#if expandedCountries.has(entry.snapshot_id)}
-                  {@const countries = expandedCountries.get(entry.snapshot_id) ?? []}
-                  {@const sorted = [...countries].sort((a, b) => b.adds - a.adds)}
-                  <tr class="country-detail-row">
-                    <td colspan="10">
-                      <div class="country-detail-grid">
-                        {#each sorted.slice(0, 20) as c}
-                          <div class="country-mini">
-                            <span class="country-flag">{countryFlag(c.country_code)}</span>
-                            <span class="country-code">{c.country_code}</span>
-                            <span class="country-val adds">+{c.adds}</span>
-                            <span class="country-val deletes">-{c.deletes}</span>
-                          </div>
-                        {/each}
-                        {#if countries.length > 20}
-                          <div class="country-mini muted">+{countries.length - 20} more</div>
-                        {/if}
-                      </div>
-                    </td>
-                  </tr>
-                {/if}
-              {/each}
-            </tbody>
-          </table>
-        </div>
-        {#if anomalyPopover}
-          <div
-            class="anomaly-popover"
-            style="left: {anomalyPopover.x}px; top: {anomalyPopover.y}px;"
-          >
-            {anomalyPopover.desc}
-          </div>
-        {/if}
-        <!-- Pagination controls -->
-        <div class="pagination-row">
-          <button
-            class="pagination-btn"
-            disabled={historyPage <= 1 || historyLoading}
-            onclick={() => fetchHistory(historyPage - 1)}
-          >
-            &larr; Newer
-          </button>
-          <span class="pagination-info">
-            Page {historyData.page} of {Math.ceil(historyData.total / historyData.per_page)}
-          </span>
-          <button
-            class="pagination-btn"
-            disabled={historyPage * historyData.per_page >= historyData.total || historyLoading}
-            onclick={() => fetchHistory(historyPage + 1)}
-          >
-            Older &rarr;
-          </button>
-        </div>
-      </div>
-    {/if}
+    <HistoryTable
+      history={historyData}
+      loading={historyLoading}
+      {flashDates}
+      {flashSnapshotIds}
+      {appId}
+      onPageChange={(p) => fetchHistory(p)}
+      onAuthError={onLogout}
+    />
   {/if}
 </div>
 
@@ -1159,36 +986,7 @@
     font-size: 1.1em;
   }
 
-  /* Platform columns in history */
-  .platform-col {
-    color: var(--text-muted);
-    font-size: 0.7rem;
-  }
-
-  .platform-val {
-    color: var(--text-muted);
-    font-size: 0.8rem;
-  }
-
-  /* History table */
-  .history-section {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 0.75rem;
-    padding: 1.5rem;
-    margin-bottom: 1.5rem;
-  }
-
-  .history-section h2 {
-    font-size: 1.1rem;
-    font-weight: 600;
-    margin-bottom: 1rem;
-  }
-
-  .history-table-wrap {
-    overflow-x: auto;
-  }
-
+  /* Shared table styles (used by the Top Countries table) */
   .history-table {
     width: 100%;
     border-collapse: collapse;
@@ -1229,182 +1027,9 @@
   .history-table td.gifts {
     color: var(--amber);
   }
-  .history-table td.muted {
-    color: var(--text-muted);
-    font-size: 0.8rem;
-  }
-
-  .anomaly-arrow {
-    display: inline-block;
-    font-size: 0.6rem;
-    margin-left: 0.25rem;
-    cursor: pointer;
-    vertical-align: middle;
-    background: none;
-    border: none;
-    padding: 0;
-    font: inherit;
-    line-height: 1;
-  }
-
-  .anomaly-arrow.up {
-    color: var(--green);
-  }
-
-  .anomaly-arrow.down {
-    color: var(--red);
-  }
-
-  .anomaly-popover {
-    position: fixed;
-    transform: translate(-50%, -100%) translateY(-8px);
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 0.5rem;
-    padding: 0.4rem 0.65rem;
-    font-size: 0.75rem;
-    color: var(--text);
-    white-space: nowrap;
-    z-index: 100;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
-    pointer-events: none;
-    line-height: 1.4;
-  }
 
   .history-table tbody tr:hover {
     background: rgba(255, 255, 255, 0.02);
-  }
-
-  .history-table tbody tr.flash-row {
-    animation: flash-row 1.5s ease-out;
-  }
-
-  .history-table tbody tr.flash-row td {
-    animation: slide-in 0.4s ease-out;
-  }
-
-  @keyframes flash-row {
-    0% {
-      background: rgba(99, 102, 241, 0.25);
-    }
-    40% {
-      background: rgba(99, 102, 241, 0.1);
-    }
-    100% {
-      background: transparent;
-    }
-  }
-
-  @keyframes slide-in {
-    0% {
-      opacity: 0;
-      transform: translateY(-8px);
-    }
-    100% {
-      opacity: 1;
-      transform: translateY(0);
-    }
-  }
-
-  /* Country expand button */
-  .country-expand-btn {
-    background: none;
-    border: 1px solid var(--border);
-    color: var(--text-muted);
-    padding: 0.2rem 0.5rem;
-    border-radius: 0.25rem;
-    cursor: pointer;
-    font-size: 0.7rem;
-    transition: border-color 0.2s, color 0.2s;
-  }
-
-  .country-expand-btn:hover {
-    border-color: var(--accent);
-    color: var(--accent);
-  }
-
-  .mini-spinner {
-    display: inline-block;
-    width: 0.7rem;
-    height: 0.7rem;
-    border: 2px solid var(--border);
-    border-top-color: var(--accent);
-    border-radius: 50%;
-    animation: spin 0.6s linear infinite;
-  }
-
-  /* Inline country detail */
-  .country-detail-row td {
-    padding: 0.5rem 0.75rem;
-    background: rgba(99, 102, 241, 0.03);
-  }
-
-  .country-detail-grid {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.5rem;
-  }
-
-  .country-mini {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.25rem;
-    font-size: 0.75rem;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    padding: 0.2rem 0.5rem;
-    border-radius: 0.25rem;
-  }
-
-  .country-code {
-    font-weight: 500;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-  }
-
-  .country-val.adds {
-    color: var(--green);
-  }
-
-  .country-val.deletes {
-    color: var(--red);
-  }
-
-  /* Pagination */
-  .pagination-row {
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    gap: 1rem;
-    margin-top: 1rem;
-    padding-top: 0.75rem;
-  }
-
-  .pagination-btn {
-    background: rgba(99, 102, 241, 0.1);
-    border: 1px solid var(--accent);
-    border-radius: 0.5rem;
-    color: var(--accent);
-    font-size: 0.85rem;
-    font-weight: 500;
-    cursor: pointer;
-    padding: 0.5rem 1rem;
-    transition: background 0.2s, color 0.2s;
-  }
-
-  .pagination-btn:hover:not(:disabled) {
-    background: rgba(99, 102, 241, 0.2);
-    color: var(--text);
-  }
-
-  .pagination-btn:disabled {
-    opacity: 0.3;
-    cursor: not-allowed;
-  }
-
-  .pagination-info {
-    font-size: 0.8rem;
-    color: var(--text-muted);
   }
 
   /* Responsive */
@@ -1431,10 +1056,6 @@
 
     .net-row {
       padding: 0.75rem 1rem;
-    }
-
-    .history-section {
-      padding: 1rem;
     }
 
     .history-table {

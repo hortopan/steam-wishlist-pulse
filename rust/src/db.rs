@@ -588,7 +588,7 @@ impl Database {
 
                 match existing {
                     Some((snapshot_id, existing_fetched_at))
-                        if existing_fetched_at.ends_with("T23:59:59Z") =>
+                        if is_eod_sentinel(&existing_fetched_at) =>
                     {
                         // Update the existing backfill snapshot in-place
                         conn.execute(
@@ -1336,7 +1336,7 @@ impl Database {
                 "DELETE FROM wishlist_snapshots WHERE app_id = ?1 AND date = ?2",
                 rusqlite::params![report.app_id, report.date],
             )?;
-            let fetched_at = format!("{}T23:59:59Z", report.date);
+            let fetched_at = eod_sentinel_timestamp(&report.date);
             conn.execute(
                 "INSERT INTO wishlist_snapshots (app_id, date, adds, deletes, purchases, gifts, adds_windows, adds_mac, adds_linux, fetched_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
@@ -1606,59 +1606,75 @@ impl Database {
         Ok(rows)
     }
 
-    /// Get paginated snapshots for a game (newest first), without country data.
-    /// Returns (snapshot_id, report) pairs and the total count.
-    pub async fn get_snapshots_paginated(
+    /// Get snapshots for a game grouped by Steam day (newest day first),
+    /// paginated by whole days. Rows within a day are ordered fetched_at ASC.
+    pub async fn get_snapshots_by_day_paginated(
         &self,
         app_id: u32,
         page: usize,
-        per_page: usize,
-    ) -> AppResult<PaginatedSnapshots> {
+        days_per_page: usize,
+    ) -> AppResult<PaginatedDaySnapshots> {
         let conn = self.pool.get().await;
 
-        let total: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM wishlist_snapshots WHERE app_id = ?1",
+        let total_days: i64 = conn.query_row(
+            "SELECT COUNT(DISTINCT date) FROM wishlist_snapshots WHERE app_id = ?1",
             [app_id],
             |row| row.get(0),
         )?;
-        let total = total as usize;
+        let total_days = total_days as usize;
 
-        let offset = (page.saturating_sub(1) * per_page) as i64;
-        let per_page_i64 = per_page as i64;
+        let offset = (page.saturating_sub(1) * days_per_page) as i64;
+        // Single statement so a concurrent insert can't change the date set
+        // between selecting the page's dates and fetching their rows.
         let mut stmt = conn.prepare(
             "SELECT id, app_id, date, adds, deletes, purchases, gifts,
                     adds_windows, adds_mac, adds_linux, fetched_at
              FROM wishlist_snapshots
-             WHERE app_id = ?1
-             ORDER BY fetched_at DESC
-             LIMIT ?2 OFFSET ?3",
+             WHERE app_id = ?1 AND date IN (
+                 SELECT DISTINCT date FROM wishlist_snapshots
+                 WHERE app_id = ?1
+                 ORDER BY date DESC
+                 LIMIT ?2 OFFSET ?3
+             )
+             ORDER BY date DESC, fetched_at ASC",
         )?;
         let rows = stmt
-            .query_map(rusqlite::params![app_id, per_page_i64, offset], |row| {
-                Ok((
-                    row.get(0)?,
-                    WishlistReport {
-                        app_id: row.get(1)?,
-                        date: row.get(2)?,
-                        adds: row.get(3)?,
-                        deletes: row.get(4)?,
-                        purchases: row.get(5)?,
-                        gifts: row.get(6)?,
-                        adds_windows: row.get(7)?,
-                        adds_mac: row.get(8)?,
-                        adds_linux: row.get(9)?,
-                        countries: Vec::new(),
-                        fetched_at: row.get(10)?,
-                        app_min_date: None,
-                    },
-                ))
-            })?
+            .query_map(
+                rusqlite::params![app_id, days_per_page as i64, offset],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        WishlistReport {
+                            app_id: row.get(1)?,
+                            date: row.get(2)?,
+                            adds: row.get(3)?,
+                            deletes: row.get(4)?,
+                            purchases: row.get(5)?,
+                            gifts: row.get(6)?,
+                            adds_windows: row.get(7)?,
+                            adds_mac: row.get(8)?,
+                            adds_linux: row.get(9)?,
+                            countries: Vec::new(),
+                            fetched_at: row.get(10)?,
+                            app_min_date: None,
+                        },
+                    ))
+                },
+            )?
             .collect::<Result<Vec<_>, _>>()?;
 
-        Ok(PaginatedSnapshots {
-            snapshots: rows,
-            total,
-        })
+        let mut days: Vec<DaySnapshots> = Vec::new();
+        for (id, report) in rows {
+            match days.last_mut() {
+                Some(day) if day.date == report.date => day.rows.push((id, report)),
+                _ => days.push(DaySnapshots {
+                    date: report.date.clone(),
+                    rows: vec![(id, report)],
+                }),
+            }
+        }
+
+        Ok(PaginatedDaySnapshots { days, total_days })
     }
 
     /// Get raw snapshots within a bounded time range (for anomaly lookback context).
@@ -1696,27 +1712,44 @@ impl Database {
         Ok(rows)
     }
 
-    /// Get country data for a specific snapshot, verifying it belongs to the given app.
-    /// Returns `None` if the snapshot doesn't exist or doesn't belong to `app_id`.
-    pub async fn get_snapshot_countries(
+    /// Get country data for one Steam day as MAX per country over the day's
+    /// snapshots — the per-country counterpart of the MAX daily totals.
+    pub async fn get_day_countries(
         &self,
         app_id: u32,
-        snapshot_id: i64,
-    ) -> AppResult<Option<Vec<CountryReport>>> {
+        date: &str,
+    ) -> AppResult<Vec<CountryReport>> {
         let conn = self.pool.get().await;
-        let owns: bool = conn
-            .query_row(
-                "SELECT COUNT(*) FROM wishlist_snapshots WHERE id = ?1 AND app_id = ?2",
-                rusqlite::params![snapshot_id, app_id],
-                |row| row.get::<_, i64>(0),
-            )
-            .map(|c| c > 0)
-            .unwrap_or(false);
-        if !owns {
-            return Ok(None);
-        }
-        Ok(Some(Self::load_countries(&conn, snapshot_id)?))
+        let mut stmt = conn.prepare(
+            "SELECT sc.country_code, MAX(sc.adds), MAX(sc.deletes), MAX(sc.purchases), MAX(sc.gifts)
+             FROM snapshot_countries sc
+             JOIN wishlist_snapshots ws ON ws.id = sc.snapshot_id
+             WHERE ws.app_id = ?1 AND ws.date = ?2
+             GROUP BY sc.country_code",
+        )?;
+        let rows = stmt
+            .query_map(rusqlite::params![app_id, date], |row| {
+                Ok(CountryReport {
+                    country_code: row.get(0)?,
+                    adds: row.get(1)?,
+                    deletes: row.get(2)?,
+                    purchases: row.get(3)?,
+                    gifts: row.get(4)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
+}
+
+/// Backfill/verification rows store this end-of-day sentinel as fetched_at
+/// instead of a real capture time.
+pub fn eod_sentinel_timestamp(date: &str) -> String {
+    format!("{date}T23:59:59Z")
+}
+
+pub fn is_eod_sentinel(ts: &str) -> bool {
+    ts.ends_with("T23:59:59Z")
 }
 
 /// Parse a flexible timestamp/label string into a NaiveDateTime.
@@ -1833,10 +1866,16 @@ pub struct ChartPoint {
     pub adds_linux: i64,
 }
 
-/// Result for a paginated history query.
-pub struct PaginatedSnapshots {
-    pub snapshots: Vec<(i64, WishlistReport)>,
-    pub total: usize,
+/// All snapshots for a single Steam day, ordered fetched_at ASC.
+pub struct DaySnapshots {
+    pub date: String,
+    pub rows: Vec<(i64, WishlistReport)>,
+}
+
+/// Result for a day-grouped paginated history query (newest day first).
+pub struct PaginatedDaySnapshots {
+    pub days: Vec<DaySnapshots>,
+    pub total_days: usize,
 }
 
 /// Determine the default database path for the current platform.
