@@ -3,8 +3,8 @@ use teloxide::types::{BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Me
 use teloxide::utils::command::BotCommands;
 
 use crate::common::{
-    BotContext, ChangeMessage, is_admin, prepare_notification, resolve_app_name,
-    resolve_app_name_short,
+    BotContext, ChangeMessage, chunk_blocks, fmt_thousands, is_admin, prepare_notification,
+    resolve_app_name, resolve_app_name_short,
 };
 use crate::db::Database;
 use crate::error::{AppError, AppResult};
@@ -343,10 +343,10 @@ async fn handle_command(
             }
         }
         Command::Status => {
-            let tracked = match state.db.get_tracked_game_ids().await {
-                Ok(ids) => ids,
+            let reports = match state.db.get_status_reports().await {
+                Ok(r) => r,
                 Err(e) => {
-                    tracing::error!("Failed to get tracked game IDs: {e}");
+                    tracing::error!("Failed to get status reports: {e}");
                     bot.send_message(
                         msg.chat.id,
                         "❌ Something went wrong. Please try again later.",
@@ -356,7 +356,7 @@ async fn handle_command(
                 }
             };
 
-            if tracked.is_empty() {
+            if reports.is_empty() {
                 bot.send_message(
                     msg.chat.id,
                     "No games being tracked. Use /track to add games.",
@@ -365,34 +365,12 @@ async fn handle_command(
                 return Ok(());
             }
 
-            let snapshots = match state.db.get_latest_snapshots().await {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::error!("Failed to get latest snapshots: {e}");
-                    bot.send_message(
-                        msg.chat.id,
-                        "❌ Something went wrong. Please try again later.",
-                    )
-                    .await?;
-                    return Ok(());
-                }
-            };
-
-            if snapshots.is_empty() {
-                bot.send_message(
-                    msg.chat.id,
-                    "No data yet. Waiting for the next background poll to fetch stats.",
-                )
-                .await?;
-                return Ok(());
-            }
-
             let app_info = state.db.get_all_app_info().await.unwrap_or_default();
-            let mut lines = Vec::new();
+            let mut blocks = Vec::new();
 
-            for report in snapshots {
+            for (report, totals) in reports {
                 let name = resolve_app_name_short(report.app_id, &app_info);
-                lines.push(format!(
+                let mut block = format!(
                     "📊 {} ({}) ({})\n   +{} adds / -{} deletes / {} purchases / {} gifts",
                     name,
                     report.app_id,
@@ -401,10 +379,19 @@ async fn handle_command(
                     report.deletes,
                     report.purchases,
                     report.gifts,
-                ));
+                );
+                if let Some(t) = totals {
+                    block.push_str(&format!(
+                        "\n   Current wishlists: {}",
+                        fmt_thousands(t.net())
+                    ));
+                }
+                blocks.push(block);
             }
 
-            bot.send_message(msg.chat.id, lines.join("\n")).await?;
+            for chunk in chunk_blocks(blocks, "\n", 4000) {
+                bot.send_message(msg.chat.id, chunk).await?;
+            }
         }
     }
 
@@ -656,13 +643,14 @@ pub async fn notify_change(
     current: &WishlistReport,
     previous: &WishlistReport,
     anomaly: Option<&crate::anomaly::AnomalyResult>,
+    current_wishlists: Option<i64>,
 ) {
     let ctx = match prepare_notification(db, "telegram", app_id).await {
         Some(ctx) => ctx,
         None => return,
     };
 
-    let msg = ChangeMessage::new(ctx.app_name, current, previous, anomaly);
+    let msg = ChangeMessage::new(ctx.app_name, current, previous, anomaly, current_wishlists);
 
     let emoji = if msg.anomaly_flags.is_some() {
         "🚨"
@@ -695,7 +683,7 @@ pub async fn notify_change(
 
     let mut message = format!(
         "{emoji} <b>{}</b> ({app_id}) > {}\n\n{adds_line}\n{deletes_line}\n{purchases_line}\n{gifts_line}",
-        msg.app_name,
+        teloxide::utils::html::escape(&msg.app_name),
         msg.header(),
     );
 
@@ -706,6 +694,10 @@ pub async fn notify_change(
         for alert in &flags.country_alerts {
             message.push_str(&format!("\n  {alert}"));
         }
+    }
+
+    if let Some(n) = msg.current_wishlists {
+        message.push_str(&format!("\n\nCurrent wishlists: {}", fmt_thousands(n)));
     }
 
     let bot = Bot::new(ctx.token);

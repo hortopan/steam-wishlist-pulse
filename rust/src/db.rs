@@ -138,6 +138,8 @@ impl Database {
 
             CREATE INDEX IF NOT EXISTS idx_snapshots_app_date
                 ON wishlist_snapshots(app_id, date);
+            CREATE INDEX IF NOT EXISTS idx_snapshots_app_date_stats
+                ON wishlist_snapshots(app_id, date, adds, deletes, purchases, gifts);
             CREATE INDEX IF NOT EXISTS idx_snapshots_fetched
                 ON wishlist_snapshots(fetched_at);
             CREATE INDEX IF NOT EXISTS idx_snapshots_app_fetched
@@ -986,6 +988,81 @@ impl Database {
         Ok(reports)
     }
 
+    /// Get the latest snapshot plus all-time totals for each tracked game,
+    /// in a single statement so both reflect the same DB state. Games without
+    /// any snapshot yet get zeroed stats and `None` totals.
+    pub async fn get_status_reports(&self) -> AppResult<Vec<(WishlistReport, Option<GameTotals>)>> {
+        let conn = self.pool.get().await;
+        let mut stmt = conn.prepare(
+            "SELECT t.app_id,
+                    COALESCE(s.date, ''),
+                    COALESCE(s.adds, 0),
+                    COALESCE(s.deletes, 0),
+                    COALESCE(s.purchases, 0),
+                    COALESCE(s.gifts, 0),
+                    COALESCE(s.adds_windows, 0),
+                    COALESCE(s.adds_mac, 0),
+                    COALESCE(s.adds_linux, 0),
+                    s.fetched_at,
+                    tot.adds,
+                    tot.deletes,
+                    tot.purchases,
+                    tot.gifts
+             FROM tracked_games t
+             LEFT JOIN wishlist_snapshots s ON s.app_id = t.app_id
+                AND s.id = (
+                    SELECT s2.id FROM wishlist_snapshots s2
+                    WHERE s2.app_id = t.app_id
+                    ORDER BY s2.fetched_at DESC
+                    LIMIT 1
+                )
+             LEFT JOIN (
+                SELECT app_id,
+                       SUM(daily_adds) AS adds,
+                       SUM(daily_deletes) AS deletes,
+                       SUM(daily_purchases) AS purchases,
+                       SUM(daily_gifts) AS gifts
+                FROM (
+                    SELECT app_id,
+                           MAX(adds) AS daily_adds,
+                           MAX(deletes) AS daily_deletes,
+                           MAX(purchases) AS daily_purchases,
+                           MAX(gifts) AS daily_gifts
+                    FROM wishlist_snapshots
+                    GROUP BY app_id, date
+                )
+                GROUP BY app_id
+             ) tot ON tot.app_id = t.app_id
+             ORDER BY t.tracked_since",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                let report = WishlistReport {
+                    app_id: row.get(0)?,
+                    date: row.get(1)?,
+                    adds: row.get(2)?,
+                    deletes: row.get(3)?,
+                    purchases: row.get(4)?,
+                    gifts: row.get(5)?,
+                    adds_windows: row.get(6)?,
+                    adds_mac: row.get(7)?,
+                    adds_linux: row.get(8)?,
+                    countries: Vec::new(),
+                    fetched_at: row.get(9)?,
+                    app_min_date: None,
+                };
+                let totals = row.get::<_, Option<i64>>(10)?.map(|adds| GameTotals {
+                    adds,
+                    deletes: row.get(11).unwrap_or(0),
+                    purchases: row.get(12).unwrap_or(0),
+                    gifts: row.get(13).unwrap_or(0),
+                });
+                Ok((report, totals))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     /// Get the total number of snapshots for a game.
     pub async fn get_snapshot_count(&self, app_id: u32) -> AppResult<usize> {
         let conn = self.pool.get().await;
@@ -1015,7 +1092,8 @@ impl Database {
                 FROM wishlist_snapshots
                 WHERE app_id = ?1
                 GROUP BY date
-             )",
+             )
+             HAVING COUNT(*) > 0",
         )?;
         let result = stmt.query_row([app_id], |row| {
             Ok(GameTotals {
@@ -1849,6 +1927,13 @@ pub struct GameTotals {
     pub deletes: i64,
     pub purchases: i64,
     pub gifts: i64,
+}
+
+impl GameTotals {
+    /// Net outstanding wishlists: adds minus everything that removes an entry.
+    pub fn net(&self) -> i64 {
+        self.adds - self.deletes - self.purchases - self.gifts
+    }
 }
 
 /// A single aggregated chart data point.

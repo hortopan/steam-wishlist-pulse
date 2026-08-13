@@ -27,6 +27,36 @@ pub fn fmt_delta(new: i64, old: i64) -> String {
     }
 }
 
+/// Format a number with comma thousands separators (e.g. 4821 -> "4,821").
+pub fn fmt_thousands(n: i64) -> String {
+    let digits = n.unsigned_abs().to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    if n < 0 { format!("-{out}") } else { out }
+}
+
+/// Pack text blocks into messages no longer than `max_len`, joining blocks
+/// within a message by `sep`. A single block longer than `max_len` becomes
+/// its own (oversized) message rather than being split mid-block.
+pub fn chunk_blocks(blocks: Vec<String>, sep: &str, max_len: usize) -> Vec<String> {
+    let mut chunks: Vec<String> = Vec::new();
+    for block in blocks {
+        match chunks.last_mut() {
+            Some(current) if current.len() + sep.len() + block.len() <= max_len => {
+                current.push_str(sep);
+                current.push_str(&block);
+            }
+            _ => chunks.push(block),
+        }
+    }
+    chunks
+}
+
 /// Resolve a display name for an app, checking DB app_info first, then in-memory steam cache.
 pub fn resolve_app_name(
     app_id: u32,
@@ -158,6 +188,8 @@ pub struct ChangeMessage {
     pub deletes: String,
     pub purchases: String,
     pub gifts: String,
+    /// Net outstanding wishlists (adds - deletes - purchases - gifts), if available.
+    pub current_wishlists: Option<i64>,
     /// Anomaly information, if detection was run.
     pub anomaly_flags: Option<AnomalyFlags>,
 }
@@ -169,6 +201,7 @@ impl ChangeMessage {
         current: &WishlistReport,
         previous: &WishlistReport,
         anomaly: Option<&AnomalyResult>,
+        current_wishlists: Option<i64>,
     ) -> Self {
         let is_same_day = current.date == previous.date;
         let (adds, deletes, purchases, gifts) = if is_same_day {
@@ -305,6 +338,7 @@ impl ChangeMessage {
             deletes,
             purchases,
             gifts,
+            current_wishlists,
             anomaly_flags,
         }
     }
@@ -318,5 +352,38 @@ impl ChangeMessage {
         } else {
             "New day snapshot"
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{chunk_blocks, fmt_thousands};
+
+    #[test]
+    fn fmt_thousands_groups_digits() {
+        assert_eq!(fmt_thousands(0), "0");
+        assert_eq!(fmt_thousands(999), "999");
+        assert_eq!(fmt_thousands(1000), "1,000");
+        assert_eq!(fmt_thousands(4821), "4,821");
+        assert_eq!(fmt_thousands(1234567), "1,234,567");
+        assert_eq!(fmt_thousands(-4821), "-4,821");
+        assert_eq!(fmt_thousands(i64::MIN), "-9,223,372,036,854,775,808");
+    }
+
+    #[test]
+    fn chunk_blocks_packs_within_limit() {
+        assert_eq!(chunk_blocks(vec![], "\n\n", 10), Vec::<String>::new());
+        assert_eq!(
+            chunk_blocks(vec!["aaa".into(), "bbb".into()], "|", 7),
+            vec!["aaa|bbb"]
+        );
+        assert_eq!(
+            chunk_blocks(vec!["aaa".into(), "bbb".into(), "ccc".into()], "|", 7),
+            vec!["aaa|bbb", "ccc"]
+        );
+        assert_eq!(
+            chunk_blocks(vec!["aaaaaaaaaa".into(), "b".into()], "|", 5),
+            vec!["aaaaaaaaaa", "b"]
+        );
     }
 }

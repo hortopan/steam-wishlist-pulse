@@ -1,13 +1,15 @@
 use serenity::Client;
 use serenity::all::{
     ChannelId, Command, CommandInteraction, CommandOptionType, Context, CreateCommand,
-    CreateCommandOption, CreateEmbed, CreateInteractionResponse, CreateMessage,
-    EditInteractionResponse, EventHandler, GatewayIntents, Ready,
+    CreateCommandOption, CreateEmbed, CreateEmbedFooter, CreateInteractionResponse,
+    CreateInteractionResponseFollowup, CreateMessage, EditInteractionResponse, EventHandler,
+    GatewayIntents, Ready,
 };
 use serenity::async_trait;
 
 use crate::common::{
-    BotContext, ChangeMessage, is_admin, prepare_notification, resolve_app_name_short,
+    BotContext, ChangeMessage, chunk_blocks, fmt_thousands, is_admin, prepare_notification,
+    resolve_app_name_short,
 };
 use crate::db::Database;
 use crate::error::{AppError, AppResult};
@@ -83,6 +85,9 @@ impl EventHandler for Handler {
             && let Err(e) = self.handle_command(&ctx, &cmd).await
         {
             tracing::error!("Error handling Discord command /{}: {e}", cmd.data.name);
+            let _ = self
+                .edit_response(&ctx, &cmd, "Something went wrong. Please try again later.")
+                .await;
         }
     }
 }
@@ -283,40 +288,24 @@ impl Handler {
     }
 
     async fn cmd_status(&self, ctx: &Context, cmd: &CommandInteraction) -> Result<(), String> {
-        let tracked = self
+        let reports = self
             .ctx
             .db
-            .get_tracked_game_ids()
+            .get_status_reports()
             .await
             .map_err(|e| e.to_string())?;
-        if tracked.is_empty() {
+        if reports.is_empty() {
             self.edit_response(ctx, cmd, "No games being tracked. Use /track to add games.")
                 .await?;
             return Ok(());
         }
 
-        let snapshots = self
-            .ctx
-            .db
-            .get_latest_snapshots()
-            .await
-            .map_err(|e| e.to_string())?;
-        if snapshots.is_empty() {
-            self.edit_response(
-                ctx,
-                cmd,
-                "No data yet. Waiting for the next background poll to fetch stats.",
-            )
-            .await?;
-            return Ok(());
-        }
-
         let app_info = self.ctx.db.get_all_app_info().await.unwrap_or_default();
-        let mut lines = Vec::new();
+        let mut blocks = Vec::new();
 
-        for report in snapshots {
+        for (report, totals) in reports {
             let name = resolve_app_name_short(report.app_id, &app_info);
-            lines.push(format!(
+            let mut block = format!(
                 "**{}** ({}) ({})\n+{} adds / -{} deletes / {} purchases / {} gifts",
                 name,
                 report.app_id,
@@ -325,10 +314,26 @@ impl Handler {
                 report.deletes,
                 report.purchases,
                 report.gifts,
-            ));
+            );
+            if let Some(t) = totals {
+                block.push_str(&format!("\nCurrent wishlists: {}", fmt_thousands(t.net())));
+            }
+            blocks.push(block);
         }
 
-        self.edit_response(ctx, cmd, &lines.join("\n\n")).await
+        for (i, chunk) in chunk_blocks(blocks, "\n\n", 1900).iter().enumerate() {
+            if i == 0 {
+                self.edit_response(ctx, cmd, chunk).await?;
+            } else {
+                cmd.create_followup(
+                    &ctx.http,
+                    CreateInteractionResponseFollowup::new().content(chunk),
+                )
+                .await
+                .map_err(|e| format!("Failed to send follow-up: {e}"))?;
+            }
+        }
+        Ok(())
     }
 
     async fn cmd_subscribe(&self, ctx: &Context, cmd: &CommandInteraction) -> Result<(), String> {
@@ -503,13 +508,14 @@ pub async fn notify_change(
     current: &WishlistReport,
     previous: &WishlistReport,
     anomaly: Option<&crate::anomaly::AnomalyResult>,
+    current_wishlists: Option<i64>,
 ) {
     let ctx = match prepare_notification(db, "discord", app_id).await {
         Some(ctx) => ctx,
         None => return,
     };
 
-    let msg = ChangeMessage::new(ctx.app_name, current, previous, anomaly);
+    let msg = ChangeMessage::new(ctx.app_name, current, previous, anomaly, current_wishlists);
 
     let http = serenity::http::Http::new(&ctx.token);
 
@@ -578,6 +584,13 @@ pub async fn notify_change(
         {
             let alerts = flags.country_alerts.join("\n");
             embed = embed.field("Country anomalies", &alerts, false);
+        }
+
+        if let Some(n) = msg.current_wishlists {
+            embed = embed.footer(CreateEmbedFooter::new(format!(
+                "Current wishlists: {}",
+                fmt_thousands(n)
+            )));
         }
 
         let message = CreateMessage::new().embed(embed);
