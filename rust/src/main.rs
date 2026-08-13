@@ -760,12 +760,24 @@ async fn polling_loop(state: AppState, poll_interval_minutes: u64) {
                                 } else {
                                     None
                                 };
+                                let current_wishlists =
+                                    match state.db.get_game_totals(report.app_id).await {
+                                        Ok(totals) => totals.map(|t| t.net()),
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                "Failed to get game totals for app {}: {e}",
+                                                report.app_id
+                                            );
+                                            None
+                                        }
+                                    };
                                 telegram::notify_change(
                                     &state.db,
                                     report.app_id,
                                     &report,
                                     &previous,
                                     anomaly_ref,
+                                    current_wishlists,
                                 )
                                 .await;
                                 discord::notify_change(
@@ -774,6 +786,7 @@ async fn polling_loop(state: AppState, poll_interval_minutes: u64) {
                                     &report,
                                     &previous,
                                     anomaly_ref,
+                                    current_wishlists,
                                 )
                                 .await;
                             }

@@ -1301,8 +1301,7 @@ async fn api_wishlist(State(state): State<AppState>, jar: CookieJar) -> Response
                 total_deletes: game_totals.map_or(0, |t| t.deletes),
                 total_purchases: game_totals.map_or(0, |t| t.purchases),
                 total_gifts: game_totals.map_or(0, |t| t.gifts),
-                current_wishlists: game_totals
-                    .map_or(0, |t| t.adds - t.deletes - t.purchases - t.gifts),
+                current_wishlists: game_totals.map_or(0, |t| t.net()),
             }
         })
         .collect();
@@ -1359,9 +1358,7 @@ async fn api_game_detail(
                 total_deletes: game_totals.as_ref().map_or(0, |t| t.deletes),
                 total_purchases: game_totals.as_ref().map_or(0, |t| t.purchases),
                 total_gifts: game_totals.as_ref().map_or(0, |t| t.gifts),
-                current_wishlists: game_totals
-                    .as_ref()
-                    .map_or(0, |t| t.adds - t.deletes - t.purchases - t.gifts),
+                current_wishlists: game_totals.as_ref().map_or(0, |t| t.net()),
             }
         });
 
@@ -3103,8 +3100,31 @@ async fn debug_test_change(
     // Insert the fake snapshot
     match state.db.insert_snapshot_if_changed(&fake_report).await {
         Ok(SnapshotChange::Changed { previous }) => {
-            crate::telegram::notify_change(&state.db, app_id, &fake_report, &previous, None).await;
-            crate::discord::notify_change(&state.db, app_id, &fake_report, &previous, None).await;
+            let current_wishlists = state
+                .db
+                .get_game_totals(app_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|t| t.net());
+            crate::telegram::notify_change(
+                &state.db,
+                app_id,
+                &fake_report,
+                &previous,
+                None,
+                current_wishlists,
+            )
+            .await;
+            crate::discord::notify_change(
+                &state.db,
+                app_id,
+                &fake_report,
+                &previous,
+                None,
+                current_wishlists,
+            )
+            .await;
             Json(serde_json::json!({
                 "status": "changed",
                 "app_id": app_id,
