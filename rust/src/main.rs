@@ -377,7 +377,7 @@ pub async fn backfill_game_history(
 
         match steam.fetch_wishlist_for_backfill(app_id, date_str).await {
             Ok(report) => {
-                let fetched_at = format!("{date_str}T23:59:59Z");
+                let fetched_at = crate::db::eod_sentinel_timestamp(date_str);
                 if let Err(e) = state
                     .db
                     .insert_backfill_snapshot(&report, &fetched_at, force)
@@ -430,7 +430,7 @@ pub async fn backfill_game_history(
                         // Try one more time
                         match steam.fetch_wishlist_for_backfill(app_id, date_str).await {
                             Ok(report) => {
-                                let fetched_at = format!("{date_str}T23:59:59Z");
+                                let fetched_at = crate::db::eod_sentinel_timestamp(date_str);
                                 let _ = state
                                     .db
                                     .insert_backfill_snapshot(&report, &fetched_at, force)

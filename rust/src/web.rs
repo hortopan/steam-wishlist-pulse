@@ -815,6 +815,7 @@ struct GameDetailResponse {
 #[derive(Serialize)]
 struct ChartPointResponse {
     label: String,
+    date: String,
     adds: i64,
     deletes: i64,
     purchases: i64,
@@ -833,10 +834,27 @@ struct ChartResponse {
     points: Vec<ChartPointResponse>,
 }
 
-/// A history entry without countries (lightweight).
+/// One intra-day snapshot, as deltas vs the previous snapshot of the same
+/// Steam day (the day's first snapshot deltas against 0).
 #[derive(Serialize)]
-struct HistoryEntry {
+struct HistorySnapshotEntry {
     snapshot_id: i64,
+    fetched_at: String,
+    delta_adds: i64,
+    delta_deletes: i64,
+    delta_purchases: i64,
+    delta_gifts: i64,
+    delta_adds_windows: i64,
+    delta_adds_mac: i64,
+    delta_adds_linux: i64,
+    /// True for backfill/verification rows whose fetched_at is the
+    /// end-of-day sentinel, not a real capture time.
+    is_eod_report: bool,
+}
+
+/// One Steam day: daily MAX totals plus intra-day snapshots (newest first).
+#[derive(Serialize)]
+struct HistoryDayEntry {
     date: String,
     adds: i64,
     deletes: i64,
@@ -845,24 +863,28 @@ struct HistoryEntry {
     adds_windows: i64,
     adds_mac: i64,
     adds_linux: i64,
-    fetched_at: String,
+    snapshot_count: usize,
+    last_snapshot_id: i64,
+    /// True when the day consists solely of a backfill/verification row.
+    is_daily_report: bool,
     is_anomaly: bool,
     anomaly_metrics: AnomalyMetrics,
+    snapshots: Vec<HistorySnapshotEntry>,
 }
 
-/// Paginated history response.
+/// Day-grouped paginated history response (per_page counts days).
 #[derive(Serialize)]
-struct PaginatedHistoryResponse {
-    entries: Vec<HistoryEntry>,
-    total: usize,
+struct DailyHistoryResponse {
+    days: Vec<HistoryDayEntry>,
+    total_days: usize,
     page: usize,
     per_page: usize,
 }
 
-/// Country data for a single snapshot.
+/// Country data for a single Steam day (MAX per country over the day).
 #[derive(Serialize)]
-struct SnapshotCountriesResponse {
-    snapshot_id: i64,
+struct DayCountriesResponse {
+    date: String,
     countries: Vec<crate::steam::CountryReport>,
 }
 
@@ -1561,6 +1583,7 @@ async fn api_game_chart(
             let is_anomaly = anomaly.adds || anomaly.deletes || anomaly.purchases || anomaly.gifts;
             ChartPointResponse {
                 label: p.label,
+                date: p.date,
                 adds: p.adds,
                 deletes: p.deletes,
                 purchases: p.purchases,
@@ -1587,7 +1610,7 @@ struct HistoryQuery {
     per_page: Option<usize>,
 }
 
-/// GET /api/wishlist/{app_id}/history?page=1&per_page=24
+/// GET /api/wishlist/{app_id}/history?page=1&per_page=7 (per_page counts days)
 async fn api_game_history(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -1602,30 +1625,31 @@ async fn api_game_history(
     }
 
     let page = query.page.unwrap_or(1).max(1);
-    let per_page = query.per_page.unwrap_or(24).clamp(1, 100);
+    let per_page = query.per_page.unwrap_or(7).clamp(1, 31);
 
     let paginated = state
         .db
-        .get_snapshots_paginated(app_id, page, per_page)
+        .get_snapshots_by_day_paginated(app_id, page, per_page)
         .await
-        .unwrap_or(crate::db::PaginatedSnapshots {
-            snapshots: Vec::new(),
-            total: 0,
+        .unwrap_or(crate::db::PaginatedDaySnapshots {
+            days: Vec::new(),
+            total_days: 0,
         });
 
-    // Compute anomaly flags for each snapshot in this page.
-    // We fetch a bounded lookback window of raw data around this page only.
+    // Compute day-level anomaly flags from a bounded lookback window around this page.
     let anomaly_config = state.get_anomaly_config().await;
     let lookback_secs = anomaly_config.lookback_days as i64 * 86400;
 
-    // Page is ordered newest-first: first() = newest, last() = oldest
+    // Days are ordered newest-first; rows within a day are fetched_at ASC.
     let newest_in_page = paginated
-        .snapshots
+        .days
         .first()
+        .and_then(|d| d.rows.last())
         .and_then(|(_, r)| r.fetched_at.clone());
     let oldest_in_page = paginated
-        .snapshots
+        .days
         .last()
+        .and_then(|d| d.rows.first())
         .and_then(|(_, r)| r.fetched_at.clone());
 
     let parse_ts = |s: &str| {
@@ -1658,12 +1682,52 @@ async fn api_game_history(
         .map(|p| (crate::db::label_to_epoch_secs(&p.label), p))
         .collect();
 
-    let entries: Vec<HistoryEntry> = paginated
-        .snapshots
+    let days: Vec<HistoryDayEntry> = paginated
+        .days
         .iter()
-        .map(|(snapshot_id, s)| {
+        .filter_map(|day| {
+            let rows = &day.rows;
+            let (last_id, last_row) = rows.last().map(|(id, r)| (*id, r))?;
+
+            // Daily totals are MAX per metric: running totals can be corrected
+            // downward, so the last row may undercount.
+            let max_of = |f: fn(&crate::steam::WishlistReport) -> i64| {
+                rows.iter().map(|(_, r)| f(r)).max().unwrap_or(0)
+            };
+
+            // Sentinel rows never advance the delta baseline: a real capture
+            // sorting after one must delta against the previous real capture.
+            let mut snapshots: Vec<HistorySnapshotEntry> = Vec::with_capacity(rows.len());
+            let mut prev: Option<&crate::steam::WishlistReport> = None;
+            let mut real_count = 0usize;
+            for (id, r) in rows {
+                let is_eod = r
+                    .fetched_at
+                    .as_deref()
+                    .is_some_and(crate::db::is_eod_sentinel);
+                snapshots.push(HistorySnapshotEntry {
+                    snapshot_id: *id,
+                    fetched_at: r.fetched_at.clone().unwrap_or_default(),
+                    delta_adds: r.adds - prev.map_or(0, |p| p.adds),
+                    delta_deletes: r.deletes - prev.map_or(0, |p| p.deletes),
+                    delta_purchases: r.purchases - prev.map_or(0, |p| p.purchases),
+                    delta_gifts: r.gifts - prev.map_or(0, |p| p.gifts),
+                    delta_adds_windows: r.adds_windows - prev.map_or(0, |p| p.adds_windows),
+                    delta_adds_mac: r.adds_mac - prev.map_or(0, |p| p.adds_mac),
+                    delta_adds_linux: r.adds_linux - prev.map_or(0, |p| p.adds_linux),
+                    is_eod_report: is_eod,
+                });
+                if !is_eod {
+                    prev = Some(r);
+                    real_count += 1;
+                }
+            }
+            snapshots.reverse();
+
+            // The detector maxes over the whole day, so one evaluation on the
+            // day's last row matches per-row evaluation.
             let anomaly_metrics = compute_anomaly_for_snapshot(
-                s,
+                last_row,
                 &context_with_secs,
                 &anomaly_config,
                 lookback_secs as f64,
@@ -1673,30 +1737,28 @@ async fn api_game_history(
                 || anomaly_metrics.purchases
                 || anomaly_metrics.gifts;
 
-            HistoryEntry {
-                snapshot_id: *snapshot_id,
-                date: if s.date.contains('T') {
-                    s.date.clone()
-                } else {
-                    format!("{}T00:00:00Z", s.date)
-                },
-                adds: s.adds,
-                deletes: s.deletes,
-                purchases: s.purchases,
-                gifts: s.gifts,
-                adds_windows: s.adds_windows,
-                adds_mac: s.adds_mac,
-                adds_linux: s.adds_linux,
-                fetched_at: s.fetched_at.clone().unwrap_or_default(),
+            Some(HistoryDayEntry {
+                date: day.date.clone(),
+                adds: max_of(|r| r.adds),
+                deletes: max_of(|r| r.deletes),
+                purchases: max_of(|r| r.purchases),
+                gifts: max_of(|r| r.gifts),
+                adds_windows: max_of(|r| r.adds_windows),
+                adds_mac: max_of(|r| r.adds_mac),
+                adds_linux: max_of(|r| r.adds_linux),
+                snapshot_count: real_count,
+                last_snapshot_id: last_id,
+                is_daily_report: real_count == 0,
                 is_anomaly,
                 anomaly_metrics,
-            }
+                snapshots,
+            })
         })
         .collect();
 
-    Json(PaginatedHistoryResponse {
-        entries,
-        total: paginated.total,
+    Json(DailyHistoryResponse {
+        days,
+        total_days: paginated.total_days,
         page,
         per_page,
     })
@@ -1933,11 +1995,11 @@ fn format_anomaly_description(metric_name: &str, current: f64, median: f64) -> S
     }
 }
 
-/// GET /api/wishlist/{app_id}/countries/{snapshot_id}
-async fn api_snapshot_countries(
+/// GET /api/wishlist/{app_id}/countries/day/{date}
+async fn api_day_countries(
     State(state): State<AppState>,
     jar: CookieJar,
-    axum::extract::Path((app_id, snapshot_id)): axum::extract::Path<(u32, i64)>,
+    axum::extract::Path((app_id, date)): axum::extract::Path<(u32, String)>,
 ) -> Response {
     if state.get_session(&jar).await.is_none() {
         return StatusCode::UNAUTHORIZED.into_response();
@@ -1946,17 +2008,12 @@ async fn api_snapshot_countries(
         return StatusCode::NOT_FOUND.into_response();
     }
 
-    let countries = match state.db.get_snapshot_countries(app_id, snapshot_id).await {
-        Ok(Some(c)) => c,
-        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+    let countries = match state.db.get_day_countries(app_id, &date).await {
+        Ok(c) => c,
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
 
-    Json(SnapshotCountriesResponse {
-        snapshot_id,
-        countries,
-    })
-    .into_response()
+    Json(DayCountriesResponse { date, countries }).into_response()
 }
 
 /// GET /api/wishlist/{app_id}/countries?range=7d
@@ -3179,8 +3236,8 @@ pub async fn run_web(bind_addr: String, state: AppState) {
         .route("/api/wishlist/{app_id}/chart", get(api_game_chart))
         .route("/api/wishlist/{app_id}/history", get(api_game_history))
         .route(
-            "/api/wishlist/{app_id}/countries/{snapshot_id}",
-            get(api_snapshot_countries),
+            "/api/wishlist/{app_id}/countries/day/{date}",
+            get(api_day_countries),
         )
         .route(
             "/api/wishlist/{app_id}/countries",

@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { ChartPoint } from './types';
   import { METRIC_CONFIG, METRIC_KEYS } from './constants';
-  import { formatNumber } from './utils';
+  import { formatNumber, formatChartLabel, formatTimePacific } from './utils';
 
   let {
     history,
@@ -53,7 +53,7 @@
     activeMetrics = next;
   }
 
-  function buildChartData(entries: ChartPoint[], metrics: Set<string>) {
+  function buildChartData(entries: ChartPoint[], metrics: Set<string>, res: string) {
     if (entries.length === 0) return null;
 
     const activeKeys = METRIC_KEYS.filter((m) => metrics.has(m));
@@ -91,11 +91,20 @@
     for (const m of activeKeys) {
       const pts = entries.map((e, i) => {
         const v = (e as any)[m] as number;
-        const pv = i > 0 ? ((entries[i - 1] as any)[m] as number) : null;
+        // Suppress the delta across the Pacific-midnight reset at raw resolution
+        const prev = i > 0 ? entries[i - 1] : null;
+        const pv =
+          prev && !(res === "raw" && prev.date !== e.date)
+            ? ((prev as any)[m] as number)
+            : null;
         return { cx: xScale(i), cy: yScale(v), entry: e, value: v, prevValue: pv };
       });
+      // Break the line at the Pacific-midnight reset instead of drawing the cliff
       const d = pts
-        .map((p, i) => `${i === 0 ? "M" : "L"}${p.cx},${p.cy}`)
+        .map((p, i) => {
+          const brk = i === 0 || (res === "raw" && entries[i].date !== entries[i - 1].date);
+          return `${brk ? "M" : "L"}${p.cx},${p.cy}`;
+        })
         .join(" ");
       paths[m] = { d, points: pts };
     }
@@ -108,17 +117,18 @@
     }
 
     // Format X labels based on resolution
+    const rawSingleDay =
+      res === "raw" && new Set(entries.map(en => en.date)).size === 1;
     const xLabels = entries.map((e, i) => {
       let label: string;
-      if (resolution === "raw") {
-        // For raw, show time if same day, otherwise date
-        const dateStr = e.label.split("T")[0]?.slice(5) ?? e.label;
-        const timeStr = e.label.split("T")[1]?.slice(0, 5);
-        const uniqueDates = new Set(entries.map(en => en.label.split("T")[0]));
-        label = uniqueDates.size === 1 && timeStr ? timeStr : dateStr;
-      } else if (resolution === "weekly") {
+      if (res === "raw") {
+        // Pacific time if all points share a Steam day, otherwise the date
+        label = rawSingleDay
+          ? formatTimePacific(e.label).replace(" PT", "") || e.date.slice(5)
+          : e.date.slice(5); // "MM-DD"
+      } else if (res === "weekly") {
         label = e.label; // "2025-W03" format
-      } else if (resolution === "monthly") {
+      } else if (res === "monthly") {
         label = e.label; // "2025-01" format
       } else {
         // daily
@@ -146,9 +156,18 @@
         if (!(am as any)[m]) continue;
         const v = (entries[i] as any)[m] as number;
         const y = yScale(v);
-        // Determine direction from description or previous value
+        // Determine direction from description or previous value; never
+        // compare across the Pacific-midnight reset
         const desc = (am.descriptions ?? []).find(d => d.toLowerCase().startsWith(m));
-        const isUp = desc ? /above|spike/i.test(desc) : (i > 0 ? v > ((entries[i - 1] as any)[m] as number) : true);
+        const prevEntry =
+          i > 0 && !(res === "raw" && entries[i - 1].date !== entries[i].date)
+            ? entries[i - 1]
+            : null;
+        const isUp = desc
+          ? /above|spike/i.test(desc)
+          : prevEntry
+            ? v > ((prevEntry as any)[m] as number)
+            : true;
         anomalyPoints.push({ x, y, entry: entries[i], metric: m, direction: isUp ? 'up' : 'down' });
       }
     }
@@ -162,7 +181,7 @@
     return { paths, yTicks, xLabels: filteredXLabels, plotW, plotH, anomalyPoints, anomalyDir };
   }
 
-  let chartData = $derived(buildChartData(history, activeMetrics));
+  let chartData = $derived(buildChartData(history, activeMetrics, resolution));
 
   $effect(() => {
     chartData;
@@ -352,7 +371,7 @@
               : '-50%'}, -120%);{hpAnomaly ? ` border-color: ${METRIC_CONFIG[hoveredPoint.metric].color};` : ''}"
         >
           <div class="tooltip-date">
-            {hoveredPoint.entry.label}
+            {formatChartLabel(hoveredPoint.entry.label, hoveredPoint.entry.date, resolution)}
           </div>
           <div
             class="tooltip-value"
